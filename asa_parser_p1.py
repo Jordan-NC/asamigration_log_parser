@@ -125,4 +125,55 @@ def check_missing_sections(sections_found):
     else:
         print(f"  [WARNING] {len(missing)} expected section(s) NOT found:")
         for m in missing:
-            print(f"
+            print(f"    - {m}")
+
+    if unexpected:
+        print(f"\n  [INFO] {len(unexpected)} unrecognized section(s) found:")
+        for u in unexpected:
+            print(f"    + {u}  (not in expected list — may be intentional)")
+
+    print("=" * 60)
+
+
+def count_lines(filepath):
+    """
+    Counts total lines in the file for reporting purposes.
+    """
+    with open(filepath, 'r', encoding='utf-8', errors='replace') as f:
+        return sum(1 for _ in f)
+
+
+def main():
+    # ── Argument handling ────────────────────────────────────
+    if len(sys.argv) != 2:
+        print("Usage: python asa_parser_p1.py <path_to_log_file>")
+        print("Example: python asa_parser_p1.py asa_logs.txt")
+        sys.exit(1)
+
+    filepath = sys.argv[1]
+
+    # ── File existence check ─────────────────────────────────
+    if not os.path.isfile(filepath):
+        print(f"[ERROR] File not found: {filepath}")
+        print("Check the path and try again.")
+        sys.exit(1)
+
+    # ── File size check ──────────────────────────────────────
+    if os.path.getsize(filepath) == 0:
+        print(f"[ERROR] File is empty: {filepath}")
+        sys.exit(1)
+
+    print(f"\n  Reading file: {filepath}\n")
+
+    # ── Run detection ────────────────────────────────────────
+    total_lines = count_lines(filepath)
+    sections_found = parse_sections(filepath)
+
+    # ── Print results ────────────────────────────────────────
+    print_table_of_contents(sections_found, total_lines)
+    check_missing_sections(sections_found)
+    print()
+
+
+if __name__ == "__main__":
+    main()
