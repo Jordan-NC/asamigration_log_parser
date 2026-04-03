@@ -3,9 +3,9 @@
 # ============================================================
 # PURPOSE:
 #   Parses three high-value migration sections using the FULL
-#   documented ASA syntax specification — not just observed
-#   sample output. Every unmatched line is explicitly captured
-#   and reported. Nothing is silently dropped.
+#   documented ASA syntax specification. Every unmatched line
+#   is explicitly captured and reported. Nothing is silently
+#   dropped.
 #
 #   Sections parsed:
 #     - ACCESS-LIST                : Hit counts, inactive rules,
@@ -14,7 +14,8 @@
 #                                    migration inventory
 #     - RUNNING-CONFIG-CRYPTO      : All transform sets, IKE
 #                                    policies, proposals, crypto
-#                                    maps, weak algorithm flags,
+#                                    maps, PKI trustpoints,
+#                                    weak algorithm flags,
 #                                    FTD compatibility assessment
 #
 # USAGE:
@@ -60,6 +61,8 @@
 #                esp-md5-hmac, esp-none
 #   TS mode    : tunnel (default), transport
 #   DH groups  : 1,2,5,14,19,20,21,24
+#   PKI        : crypto ca trustpoint, certificate chain,
+#                trustpool, IKEv2 RA trustpoint, am-disable
 #   FTD status : REMOVED / DEPRECATED / OK per algorithm
 # ============================================================
 
@@ -68,11 +71,16 @@ import sys
 import os
 from collections import defaultdict
 
-# ── Section header regex ──────────────────────────────────────
+
+# ════════════════════════════════════════════════════════════
+# SECTION HEADER PATTERN
+# ════════════════════════════════════════════════════════════
+
 SECTION_PATTERN = re.compile(
     r'^!\s*===SECTION:\s*([A-Z0-9_\-]+)\s*===$',
     re.IGNORECASE
 )
+
 
 # ════════════════════════════════════════════════════════════
 # SECTION EXTRACTION
@@ -83,8 +91,7 @@ def extract_sections(filepath):
     Reads the log file and returns:
       { section_name: [raw lines with leading whitespace preserved] }
     Leading whitespace is preserved because indented lines in
-    show access-list output are expanded object references —
-    indentation is the only way to detect and skip them.
+    show access-list and crypto blocks carry structural meaning.
     """
     sections_data = {}
     current_section = None
@@ -109,6 +116,7 @@ def extract_sections(filepath):
 # ════════════════════════════════════════════════════════════
 
 # FTD status values: 'REMOVED', 'DEPRECATED', 'OK'
+
 FTD_ESP_ENCRYPTION = {
     'esp-des'         : 'REMOVED',
     'esp-3des'        : 'REMOVED',
@@ -148,12 +156,11 @@ FTD_ESP_INTEGRITY = {
 }
 
 FTD_IKE_ENCRYPTION = {
-    'des'     : 'REMOVED',
-    '3des'    : 'REMOVED',
-    'aes'     : 'OK',
-    'aes-192' : 'OK',
-    'aes-256' : 'OK',
-    # IKEv2 only
+    'des'         : 'REMOVED',
+    '3des'        : 'REMOVED',
+    'aes'         : 'OK',
+    'aes-192'     : 'OK',
+    'aes-256'     : 'OK',
     'aes-gcm'     : 'OK',
     'aes-gcm-192' : 'OK',
     'aes-gcm-256' : 'OK',
@@ -169,94 +176,70 @@ FTD_IKE_HASH = {
 }
 
 # DH group FTD status
-# Group 5: deprecated for IKEv1, removed for IKEv2
+# Group 5  : deprecated for IKEv1, removed for IKEv2
 # Groups 2, 24: removed entirely in FTD 6.7+
 FTD_DH_GROUPS = {
     '1'  : 'REMOVED',
     '2'  : 'REMOVED',
-    '5'  : 'DEPRECATED',   # IKEv1 deprecated, IKEv2 removed
+    '5'  : 'DEPRECATED',
     '14' : 'OK',
     '19' : 'OK',
     '20' : 'OK',
     '21' : 'OK',
-    '24' : 'REMOVED',      # Removed in FTD 6.7+
+    '24' : 'REMOVED',
 }
 
 FTD_STATUS_SYMBOL = {
-    'REMOVED'    : '❌ REMOVED',
-    'DEPRECATED' : '⚠️  DEPRECATED',
-    'OK'         : '✅ OK',
+    'REMOVED'    : 'REMOVED',
+    'DEPRECATED' : 'DEPRECATED',
+    'OK'         : 'OK',
 }
 
 
 def ftd_enc_status(alg):
-    return FTD_ESP_ENCRYPTION.get(alg.lower(), 'UNKNOWN')
+    return FTD_ESP_ENCRYPTION.get(alg.lower().strip(), 'UNKNOWN')
 
 def ftd_int_status(alg):
-    return FTD_ESP_INTEGRITY.get(alg.lower(), 'UNKNOWN')
+    return FTD_ESP_INTEGRITY.get(alg.lower().strip(), 'UNKNOWN')
 
 def ftd_ike_enc_status(alg):
-    return FTD_IKE_ENCRYPTION.get(alg.lower(), 'UNKNOWN')
+    return FTD_IKE_ENCRYPTION.get(alg.lower().strip(), 'UNKNOWN')
 
 def ftd_ike_hash_status(alg):
-    return FTD_IKE_HASH.get(alg.lower(), 'UNKNOWN')
+    return FTD_IKE_HASH.get(alg.lower().strip(), 'UNKNOWN')
 
 def ftd_dh_status(group):
-    # Normalize: strip 'group' keyword if present
     g = re.sub(r'group\s*', '', group.lower()).strip()
     return FTD_DH_GROUPS.get(g, 'UNKNOWN')
+
+def risk_symbol(status):
+    return {
+        'REMOVED'    : '[REMOVED]',
+        'DEPRECATED' : '[DEPRECATED]',
+        'OK'         : '[OK]',
+        'UNKNOWN'    : '[UNKNOWN]',
+    }.get(status, '[UNKNOWN]')
 
 
 # ════════════════════════════════════════════════════════════
 # ACL SYNTAX CONSTANTS (full documented spec)
 # ════════════════════════════════════════════════════════════
 
-# All protocols ASA extended ACL supports
 ASA_PROTOCOLS = {
     'ip', 'tcp', 'udp', 'icmp', 'icmp6', 'esp', 'ah', 'gre',
     'ospf', 'eigrp', 'pim', 'igmp', 'sctp', 'object',
     'object-group',
 }
 
-# All named TCP/UDP ports ASA recognizes
-ASA_PORT_NAMES = {
-    'www', 'http', 'https', 'ftp', 'ftp-data', 'ssh', 'telnet',
-    'smtp', 'pop3', 'imap4', 'imap', 'ntp', 'snmp', 'snmptrap',
-    'dns', 'domain', 'bgp', 'ldap', 'ldaps', 'kerberos',
-    'radius', 'tacacs', 'tacacs+', 'h323', 'sip', 'rtsp',
-    'sqlnet', 'oracle', 'mysql', 'mssql', 'msrpc', 'netbios-ns',
-    'netbios-dgm', 'netbios-ssn', 'aol', 'citrix-ica', 'pptp',
-    'rsh', 'rlogin', 'exec', 'talk', 'ident', 'finger',
-    'daytime', 'time', 'chargen', 'echo', 'discard', 'whois',
-    'gopher', 'hostname', 'sunrpc', 'rip', 'pim-auto-rp',
-    'mobile-ip', 'bootps', 'bootpc', 'tftp', 'syslog',
-    'isakmp', 'non500-isakmp', 'lotusnotes', 'ctiqbe',
-    'asdm', 'secureid', 'kshell', 'klogin',
-}
-
-# All ICMP type names ASA recognizes in ACLs
-ASA_ICMP_TYPES = {
-    'echo', 'echo-reply', 'unreachable', 'source-quench',
-    'redirect', 'alternate-address', 'information-request',
-    'information-reply', 'mask-request', 'mask-reply',
-    'traceroute', 'time-exceeded', 'parameter-problem',
-    'router-advertisement', 'router-solicitation',
-    'mobile-redirect',
-}
-
-# All log levels ASA supports in ACL log keyword
 ASA_LOG_LEVELS = {
     'emergencies', 'alerts', 'critical', 'errors',
     'warnings', 'notifications', 'informational', 'debugging',
     'disable',
 }
 
-# All ACL types
-ASA_ACL_TYPES = {'extended', 'standard', 'ethertype', 'webtype', 'ipv6'}
-
 
 # ════════════════════════════════════════════════════════════
-# PARSER 1: ACCESS-LIST (show access-list)
+# ACL REGEX PATTERNS
 # ════════════════════════════════════════════════════════════
 
 # Summary line: access-list <name>; <n> elements; name hash: 0x...
@@ -265,21 +248,19 @@ RE_ACL_SUMMARY = re.compile(
     re.IGNORECASE
 )
 
-# Cached log flows line (global, skip)
+# Global cached log flows (skip)
 RE_ACL_CACHED = re.compile(
     r'^access-list cached ACL log flows',
     re.IGNORECASE
 )
 
-# Remark line
-# access-list <name> line <n> remark <text>
+# Remark line (show access-list form — has line number)
 RE_ACL_REMARK_SHOW = re.compile(
     r'^access-list\s+(\S+)\s+line\s+(\d+)\s+remark\s+(.*)',
     re.IGNORECASE
 )
 
-# Extended rule line with hitcnt
-# access-list <name> line <n> extended <permit|deny> <body> (hitcnt=N) [0xhash]
+# Rule line with hit count (show access-list form)
 RE_ACL_RULE_SHOW = re.compile(
     r'^access-list\s+(\S+)\s+line\s+(\d+)\s+'
     r'(extended|standard|ethertype|webtype|ipv6)\s+'
@@ -292,27 +273,42 @@ RE_ACL_RULE_SHOW = re.compile(
     re.IGNORECASE
 )
 
-# Partial match: any line starting with "access-list" that we
-# couldn't fully parse above — captured as partial
-RE_ACL_PARTIAL = re.compile(
-    r'^access-list\s+\S+',
+# Partial: any access-list line we couldn't fully parse
+RE_ACL_PARTIAL = re.compile(r'^access-list\s+\S+', re.IGNORECASE)
+
+# Modifiers
+RE_INACTIVE   = re.compile(r'\(inactive\)', re.IGNORECASE)
+RE_TIME_RANGE = re.compile(r'\btime-range\s+(\S+)', re.IGNORECASE)
+RE_OBJ_GROUP  = re.compile(r'\bobject-group\s+\S+', re.IGNORECASE)
+RE_OBJ        = re.compile(r'\bobject\s+\S+', re.IGNORECASE)
+RE_FQDN       = re.compile(r'\bfqdn\s+\S+', re.IGNORECASE)
+RE_PORT_OP    = re.compile(
+    r'\b(eq|neq|lt|gt|range)\s+(\S+(?:\s+\S+)?)',
     re.IGNORECASE
 )
 
-# Detect inactive keyword anywhere in rule text
-RE_INACTIVE = re.compile(r'\(inactive\)', re.IGNORECASE)
+# Running-config ACL remark (no line number)
+RE_CFG_REMARK = re.compile(
+    r'^access-list\s+(\S+)\s+remark\s+(.*)',
+    re.IGNORECASE
+)
 
-# Detect time-range reference
-RE_TIME_RANGE = re.compile(r'\btime-range\s+(\S+)', re.IGNORECASE)
+# Running-config ACL rule
+RE_CFG_RULE = re.compile(
+    r'^access-list\s+(\S+)\s+'
+    r'(?:(extended|standard|ethertype|webtype|ipv6)\s+)?'
+    r'(permit|deny)\s+'
+    r'(\S+)\s+'
+    r'(.+?)$',
+    re.IGNORECASE
+)
 
-# Detect object/object-group references
-RE_OBJ_GROUP = re.compile(r'\bobject-group\s+\S+', re.IGNORECASE)
-RE_OBJ       = re.compile(r'\bobject\s+\S+', re.IGNORECASE)
+RE_CFG_PARTIAL = re.compile(r'^access-list\s+\S+', re.IGNORECASE)
 
-# Detect log level
+
 def extract_log_level(text):
-    """Returns log level string found in ACL rule text, or 'default' if
-    'log' keyword present without level, or None if no logging."""
+    """Returns log level found in ACL rule text, 'default' if
+    log keyword present without level, or None if no logging."""
     for level in ASA_LOG_LEVELS:
         if re.search(rf'\blog\s+{level}\b', text, re.IGNORECASE):
             return level
@@ -320,15 +316,137 @@ def extract_log_level(text):
         return 'default'
     return None
 
-# Detect port operators
-RE_PORT_OP = re.compile(
-    r'\b(eq|neq|lt|gt|range)\s+(\S+(?:\s+\S+)?)',
+
+# ════════════════════════════════════════════════════════════
+# CRYPTO REGEX PATTERNS
+# ════════════════════════════════════════════════════════════
+
+# IKEv1 policy block
+RE_IKEv1_POLICY = re.compile(r'^crypto ikev1 policy\s+(\d+)', re.IGNORECASE)
+RE_IKEv1_ENC    = re.compile(r'^\s*encryption\s+(\S+)', re.IGNORECASE)
+RE_IKEv1_HASH   = re.compile(r'^\s*hash\s+(\S+)', re.IGNORECASE)
+RE_IKEv1_AUTH   = re.compile(r'^\s*authentication\s+(\S+)', re.IGNORECASE)
+RE_IKEv1_GROUP  = re.compile(r'^\s*group\s+(\d+)', re.IGNORECASE)
+RE_IKEv1_LIFE   = re.compile(r'^\s*lifetime\s+(\d+)', re.IGNORECASE)
+
+# IKEv2 policy block
+RE_IKEv2_POLICY = re.compile(r'^crypto ikev2 policy\s+(\d+)', re.IGNORECASE)
+RE_IKEv2_ENC    = re.compile(r'^\s*encryption\s+(.+)', re.IGNORECASE)
+RE_IKEv2_INT    = re.compile(r'^\s*integrity\s+(.+)', re.IGNORECASE)
+RE_IKEv2_PRF    = re.compile(r'^\s*prf\s+(.+)', re.IGNORECASE)
+RE_IKEv2_GROUP  = re.compile(r'^\s*group\s+(.+)', re.IGNORECASE)
+RE_IKEv2_LIFE   = re.compile(
+    r'^\s*lifetime\s+seconds\s+(\d+)', re.IGNORECASE
+)
+
+# IKEv1 transform sets
+RE_IKEv1_TS = re.compile(
+    r'^crypto ipsec ikev1 transform-set\s+(\S+)\s+(\S+)(?:\s+(\S+))?',
+    re.IGNORECASE
+)
+RE_TS_MODE = re.compile(
+    r'^crypto ipsec ikev1 transform-set\s+\S+.*\s+mode\s+(transport|tunnel)',
     re.IGNORECASE
 )
 
-# Detect FQDN
-RE_FQDN = re.compile(r'\bfqdn\s+\S+', re.IGNORECASE)
+# IKEv2 IPsec proposals
+RE_IKEv2_PROP = re.compile(
+    r'^crypto ipsec ikev2 ipsec-proposal\s+(\S+)',
+    re.IGNORECASE
+)
+RE_PROP_ENC = re.compile(r'^\s*protocol esp encryption\s+(.+)', re.IGNORECASE)
+RE_PROP_INT = re.compile(r'^\s*protocol esp integrity\s+(.+)', re.IGNORECASE)
+RE_PROP_AH  = re.compile(r'^\s*protocol ah\s+(.+)', re.IGNORECASE)
 
+# IPsec profile
+RE_IPSEC_PROFILE = re.compile(r'^crypto ipsec profile\s+(\S+)', re.IGNORECASE)
+
+# IPsec global settings
+RE_IPSEC_GLOBAL = re.compile(
+    r'^crypto ipsec\s+(?!ikev1|ikev2|profile)(.+)',
+    re.IGNORECASE
+)
+
+# IKE enable
+RE_IKE_ENABLE = re.compile(
+    r'^crypto (ikev1|ikev2) enable\s+(\S+)',
+    re.IGNORECASE
+)
+
+# Dynamic map
+RE_DYN_MAP = re.compile(
+    r'^crypto dynamic-map\s+(\S+)\s+(\d+)\s+(.+)',
+    re.IGNORECASE
+)
+
+# Static crypto map
+RE_CRYPTO_MAP = re.compile(
+    r'^crypto map\s+(\S+)\s+(\d+)\s+(match|set|interface|ipsec-isakmp)(\s+.+)?$',
+    re.IGNORECASE
+)
+
+# Crypto map interface binding
+RE_CRYPTO_MAP_IFACE = re.compile(
+    r'^crypto map\s+(\S+)\s+interface\s+(\S+)',
+    re.IGNORECASE
+)
+
+# Legacy ISAKMP
+RE_ISAKMP_POLICY = re.compile(r'^crypto isakmp policy\s+(\d+)', re.IGNORECASE)
+RE_ISAKMP_GLOBAL = re.compile(
+    r'^crypto isakmp\s+(?!policy)(.+)',
+    re.IGNORECASE
+)
+
+# SA lifetime
+RE_SA_LIFETIME = re.compile(
+    r'^crypto ipsec security-association\s+(lifetime|pmtu-aging)\s+(.+)',
+    re.IGNORECASE
+)
+
+# PKI / crypto ca patterns
+RE_CA_TRUSTPOINT = re.compile(
+    r'^crypto ca trustpoint\s+(\S+)',
+    re.IGNORECASE
+)
+RE_CA_TRUSTPOOL = re.compile(
+    r'^crypto ca trustpool\s+(.+)',
+    re.IGNORECASE
+)
+RE_CA_CERT_CHAIN = re.compile(
+    r'^crypto ca certificate chain\s+(\S+)',
+    re.IGNORECASE
+)
+RE_IKEv2_RA_TRUSTPOINT = re.compile(
+    r'^crypto ikev2 remote-access trustpoint\s+(\S+)',
+    re.IGNORECASE
+)
+RE_IKEv1_AM_DISABLE = re.compile(
+    r'^crypto ikev1 am-disable',
+    re.IGNORECASE
+)
+
+# Trustpoint sub-commands (must be indented)
+RE_TP_ENROLLMENT  = re.compile(r'^\s+enrollment\s+(.+)', re.IGNORECASE)
+RE_TP_REVOCATION  = re.compile(r'^\s+revocation-check\s+(.+)', re.IGNORECASE)
+RE_TP_SUBJECT     = re.compile(r'^\s+subject-name\s+(.+)', re.IGNORECASE)
+RE_TP_USAGE       = re.compile(r'^\s+usage\s+(.+)', re.IGNORECASE)
+RE_TP_KEYPAIR     = re.compile(r'^\s+keypair\s+(\S+)', re.IGNORECASE)
+RE_TP_FQDN        = re.compile(r'^\s+fqdn\s+(\S+)', re.IGNORECASE)
+RE_TP_CRL         = re.compile(r'^\s+crl\s+configure', re.IGNORECASE)
+RE_TP_NO_VALIDATE = re.compile(r'^\s+no\s+validation-usage', re.IGNORECASE)
+RE_TP_IP          = re.compile(r'^\s+ip-address\s+(\S+)', re.IGNORECASE)
+
+# Certificate serial inside cert chain block
+RE_CERT_SERIAL = re.compile(r'^\s*certificate\s+(\S+)', re.IGNORECASE)
+
+# Partial crypto: any crypto line not matched above
+RE_CRYPTO_PARTIAL = re.compile(r'^crypto\s+', re.IGNORECASE)
+
+
+# ════════════════════════════════════════════════════════════
+# PARSER 1: ACCESS-LIST (show access-list)
+# ════════════════════════════════════════════════════════════
 
 def parse_access_list_show(lines):
     """
@@ -337,32 +455,26 @@ def parse_access_list_show(lines):
     Returns:
       acl_meta     : { name: { 'elements': int } }
       acl_rules    : { name: [ rule_dict ] }
-      acl_partials : { name: [ partial_line ] }
+      acl_partials : { name: [ line ] }
       unmatched    : [ line ]
     """
     acl_meta     = {}
     acl_rules    = defaultdict(list)
     acl_partials = defaultdict(list)
     unmatched    = []
-
-    pending_remark = {}   # { acl_name: remark_text }
+    pending_remark = {}
 
     for line in lines:
-        # Skip blank lines
         if not line.strip():
             continue
 
-        # Skip global cached log flows header
         if RE_ACL_CACHED.match(line.strip()):
             continue
 
-        # Skip alert-interval lines (global setting, not a rule)
         if line.strip().lower().startswith('alert-interval'):
             continue
 
         # Skip indented lines — expanded object references
-        # These start with whitespace and are sub-entries of the
-        # previous rule showing resolved object content
         if line and (line[0] == ' ' or line[0] == '\t'):
             continue
 
@@ -371,16 +483,13 @@ def parse_access_list_show(lines):
         # ── Layer 1a: Summary line ───────────────────────────
         m = RE_ACL_SUMMARY.match(stripped)
         if m:
-            name = m.group(1)
-            acl_meta[name] = {'elements': int(m.group(2))}
+            acl_meta[m.group(1)] = {'elements': int(m.group(2))}
             continue
 
         # ── Layer 1b: Remark line ────────────────────────────
         m = RE_ACL_REMARK_SHOW.match(stripped)
         if m:
-            name = m.group(1)
-            text = m.group(3).strip()
-            pending_remark[name] = text
+            pending_remark[m.group(1)] = m.group(3).strip()
             continue
 
         # ── Layer 1c: Full rule line ─────────────────────────
@@ -394,19 +503,7 @@ def parse_access_list_show(lines):
             hitcnt   = int(m.group(6))
             inactive = bool(m.group(7))
 
-            log_level   = extract_log_level(body)
-            has_obj_grp = bool(RE_OBJ_GROUP.search(body))
-            has_obj     = bool(RE_OBJ.search(body))
-            has_fqdn    = bool(RE_FQDN.search(body))
-            time_range  = None
             tr_m = RE_TIME_RANGE.search(body)
-            if tr_m:
-                time_range = tr_m.group(1)
-
-            # Extract port operations for service inventory
-            port_ops = RE_PORT_OP.findall(body)
-
-            remark = pending_remark.pop(name, '')
 
             acl_rules[name].append({
                 'line'       : line_num,
@@ -415,20 +512,18 @@ def parse_access_list_show(lines):
                 'body'       : body,
                 'hitcnt'     : hitcnt,
                 'inactive'   : inactive,
-                'remark'     : remark,
-                'log_level'  : log_level,
-                'has_obj_grp': has_obj_grp,
-                'has_obj'    : has_obj,
-                'has_fqdn'   : has_fqdn,
-                'time_range' : time_range,
-                'port_ops'   : port_ops,
+                'remark'     : pending_remark.pop(name, ''),
+                'log_level'  : extract_log_level(body),
+                'has_obj_grp': bool(RE_OBJ_GROUP.search(body)),
+                'has_obj'    : bool(RE_OBJ.search(body)),
+                'has_fqdn'   : bool(RE_FQDN.search(body)),
+                'time_range' : tr_m.group(1) if tr_m else None,
+                'port_ops'   : RE_PORT_OP.findall(body),
             })
             continue
 
         # ── Layer 2: Partial match ───────────────────────────
-        # Line starts with "access-list" but didn't fully parse
         if RE_ACL_PARTIAL.match(stripped):
-            # Try to extract ACL name for grouping
             parts = stripped.split()
             name = parts[1] if len(parts) > 1 else 'UNKNOWN'
             acl_partials[name].append(stripped)
@@ -441,9 +536,7 @@ def parse_access_list_show(lines):
 
 
 def print_access_list_show(acl_meta, acl_rules, acl_partials, unmatched):
-    """
-    Prints show access-list analysis report.
-    """
+    """Prints show access-list analysis report."""
     print("=" * 78)
     print("  ACCESS LIST ANALYSIS  (show access-list)")
     print("=" * 78)
@@ -454,22 +547,18 @@ def print_access_list_show(acl_meta, acl_rules, acl_partials, unmatched):
             print(f"  {len(unmatched)} unmatched line(s) — see UNMATCHED section.")
         return
 
-    all_names = sorted(set(list(acl_meta.keys()) + list(acl_rules.keys())))
+    all_names = sorted(
+        set(list(acl_meta.keys()) + list(acl_rules.keys()))
+    )
 
-    # Global counters
-    g_rules     = 0
-    g_zero_hit  = 0
-    g_inactive  = 0
-    g_deny      = 0
-    g_time_range = 0
-    g_fqdn      = 0
+    g_rules = g_zero_hit = g_inactive = g_deny = 0
+    g_time_range = g_fqdn = 0
 
     for name in all_names:
         rules    = acl_rules.get(name, [])
         elements = acl_meta.get(name, {}).get('elements', len(rules))
 
-        zero_hit   = [r for r in rules if r['hitcnt'] == 0
-                      and not r['inactive']]
+        zero_hit   = [r for r in rules if r['hitcnt'] == 0 and not r['inactive']]
         inactive   = [r for r in rules if r['inactive']]
         denies     = [r for r in rules if r['action'] == 'deny']
         obj_rules  = [r for r in rules if r['has_obj_grp'] or r['has_obj']]
@@ -477,14 +566,13 @@ def print_access_list_show(acl_meta, acl_rules, acl_partials, unmatched):
         tr_rules   = [r for r in rules if r['time_range']]
         logged     = [r for r in rules if r['log_level']]
 
-        g_rules    += len(rules)
-        g_zero_hit += len(zero_hit)
-        g_inactive += len(inactive)
-        g_deny     += len(denies)
+        g_rules      += len(rules)
+        g_zero_hit   += len(zero_hit)
+        g_inactive   += len(inactive)
+        g_deny       += len(denies)
         g_time_range += len(tr_rules)
-        g_fqdn     += len(fqdn_rules)
+        g_fqdn       += len(fqdn_rules)
 
-        # Log level breakdown
         log_counts = defaultdict(int)
         for r in logged:
             log_counts[r['log_level']] += 1
@@ -502,12 +590,11 @@ def print_access_list_show(acl_meta, acl_rules, acl_partials, unmatched):
         print(f"     Rules with logging   : {len(logged)}")
 
         if log_counts:
-            levels_str = ', '.join(
+            lvl_str = ', '.join(
                 f"{lvl}({cnt})" for lvl, cnt in sorted(log_counts.items())
             )
-            print(f"     Log levels           : {levels_str}")
+            print(f"     Log levels           : {lvl_str}")
 
-        # ── Inactive rules detail ────────────────────────────
         if inactive:
             print(f"\n     [FLAG] INACTIVE RULES — must remove before FTD migration")
             print(f"     FTD does not support the 'inactive' keyword:")
@@ -516,44 +603,36 @@ def print_access_list_show(acl_meta, acl_rules, acl_partials, unmatched):
                 print(f"       Line {r['line']:>4}: {r['action'].upper()}"
                       f"  {r['body'][:55]}{rm}")
 
-        # ── Zero-hit rules detail ────────────────────────────
         if zero_hit:
             print(f"\n     [FLAG] ZERO-HIT RULES ({len(zero_hit)})"
                   f" — review for cleanup before migration")
             deny_zero = [r for r in zero_hit if r['action'] == 'deny']
             if deny_zero:
                 print(f"     DENY rules with zero hits (highest review priority):")
-                for r in deny_zero[:10]:  # Show max 10
+                for r in deny_zero[:10]:
                     print(f"       Line {r['line']:>4}: DENY  {r['body'][:55]}")
                 if len(deny_zero) > 10:
                     print(f"       ... and {len(deny_zero) - 10} more")
 
-        # ── Time-range rules ─────────────────────────────────
         if tr_rules:
             print(f"\n     [INFO] TIME-RANGE RULES ({len(tr_rules)})")
-            print(f"     Time-range ACEs require time-range objects in FMC.")
-            print(f"     Referenced time-ranges:")
+            print(f"     Time-range objects must be manually created in FMC.")
             tr_names = sorted(set(
                 r['time_range'] for r in tr_rules if r['time_range']
             ))
             for tr in tr_names:
                 print(f"       • {tr}")
 
-        # ── FQDN rules ───────────────────────────────────────
         if fqdn_rules:
             print(f"\n     [INFO] FQDN-BASED RULES ({len(fqdn_rules)})")
-            print(f"     FTD supports FQDN objects — verify DNS resolution")
-            print(f"     is configured in FMC before deploying these rules.")
+            print(f"     Verify DNS resolution is configured in FMC.")
 
-        # ── Partials for this ACL ────────────────────────────
         partials = acl_partials.get(name, [])
         if partials:
-            print(f"\n     [PARTIAL] {len(partials)} line(s) partially matched"
-                  f" — parsed ACL name but rule format unrecognized:")
+            print(f"\n     [PARTIAL] {len(partials)} line(s) partially matched:")
             for p in partials:
                 print(f"       {p[:75]}")
 
-    # ── Global summary ────────────────────────────────────────
     print(f"\n  {'='*78}")
     print(f"  ACL GLOBAL SUMMARY")
     print(f"  {'='*78}")
@@ -569,29 +648,25 @@ def print_access_list_show(acl_meta, acl_rules, acl_partials, unmatched):
         print()
         print("  [MIGRATION BLOCKER] Inactive rules must be removed.")
         print("  FTD does not support the 'inactive' keyword in ACEs.")
-        print("  Remove or convert them before using FMT.")
 
     if g_zero_hit:
         print()
         print("  [MIGRATION NOTE] Zero-hit rules may be stale policy.")
-        print("  Review with customer — reducing rule count simplifies")
-        print("  FMC Access Control Policy and speeds up rule deployment.")
+        print("  Review with customer before migrating to reduce policy")
+        print("  complexity on FTD.")
 
     if g_time_range:
         print()
         print("  [MIGRATION NOTE] Time-range objects must be manually")
-        print("  created in FMC before ACL migration. FMT does not")
-        print("  automatically migrate time-range configurations.")
+        print("  created in FMC. FMT does not migrate time-ranges.")
 
-    # ── Unmatched lines ───────────────────────────────────────
     if unmatched:
         print(f"\n  {'='*78}")
-        print(f"  UNMATCHED LINES IN ACCESS-LIST SECTION"
-              f" ({len(unmatched)} line(s))")
+        print(f"  UNMATCHED LINES IN ACCESS-LIST SECTION ({len(unmatched)})")
         print(f"  {'='*78}")
         print("  These lines were not recognized by any pattern.")
-        print("  Review manually — they may represent ACL syntax")
-        print("  variants not yet covered by this parser.")
+        print("  Review manually — may represent syntax variants")
+        print("  not yet covered by this parser version.")
         for u in unmatched[:20]:
             print(f"    {u[:75]}")
         if len(unmatched) > 20:
@@ -603,28 +678,6 @@ def print_access_list_show(acl_meta, acl_rules, acl_partials, unmatched):
 # PARSER 2: RUNNING-CONFIG-ACCESS-LIST
 # ════════════════════════════════════════════════════════════
 
-# Remark line (config form — no line number)
-RE_CFG_REMARK = re.compile(
-    r'^access-list\s+(\S+)\s+remark\s+(.*)',
-    re.IGNORECASE
-)
-
-# Extended/typed rule line (config form — no line number, no hitcnt)
-# access-list <name> [extended|standard|ethertype|webtype|ipv6]
-#   <permit|deny> <protocol> <src> <dst> [port ops] [log [level]] [inactive]
-#   [time-range <name>]
-RE_CFG_RULE = re.compile(
-    r'^access-list\s+(\S+)\s+'
-    r'(?:(extended|standard|ethertype|webtype|ipv6)\s+)?'
-    r'(permit|deny)\s+'
-    r'(\S+)\s+'    # protocol or object/object-group
-    r'(.+?)$',     # rest of rule
-    re.IGNORECASE
-)
-
-RE_CFG_PARTIAL = re.compile(r'^access-list\s+\S+', re.IGNORECASE)
-
-
 def parse_running_config_acl(lines):
     """
     Parses 'show running-config access-list' output.
@@ -634,9 +687,9 @@ def parse_running_config_acl(lines):
       cfg_partials : { name: [ line ] }
       unmatched    : [ line ]
     """
-    cfg_rules    = defaultdict(list)
-    cfg_partials = defaultdict(list)
-    unmatched    = []
+    cfg_rules      = defaultdict(list)
+    cfg_partials   = defaultdict(list)
+    unmatched      = []
     pending_remark = {}
 
     for line in lines:
@@ -660,32 +713,21 @@ def parse_running_config_acl(lines):
             protocol = m.group(4).lower()
             rest     = m.group(5).strip()
 
-            inactive   = bool(re.search(r'\binactive\b', rest, re.IGNORECASE))
-            log_level  = extract_log_level(rest)
-            has_obj_grp = bool(RE_OBJ_GROUP.search(rest))
-            has_obj    = bool(RE_OBJ.search(rest))
-            has_fqdn   = bool(RE_FQDN.search(rest))
-            time_range = None
             tr_m = RE_TIME_RANGE.search(rest)
-            if tr_m:
-                time_range = tr_m.group(1)
-            port_ops   = RE_PORT_OP.findall(rest)
-
-            remark = pending_remark.pop(name, '')
 
             cfg_rules[name].append({
                 'action'     : action,
                 'acl_type'   : acl_type,
                 'protocol'   : protocol,
                 'rest'       : rest,
-                'inactive'   : inactive,
-                'log_level'  : log_level,
-                'has_obj_grp': has_obj_grp,
-                'has_obj'    : has_obj,
-                'has_fqdn'   : has_fqdn,
-                'time_range' : time_range,
-                'port_ops'   : port_ops,
-                'remark'     : remark,
+                'inactive'   : bool(re.search(r'\binactive\b', rest, re.IGNORECASE)),
+                'log_level'  : extract_log_level(rest),
+                'has_obj_grp': bool(RE_OBJ_GROUP.search(rest)),
+                'has_obj'    : bool(RE_OBJ.search(rest)),
+                'has_fqdn'   : bool(RE_FQDN.search(rest)),
+                'time_range' : tr_m.group(1) if tr_m else None,
+                'port_ops'   : RE_PORT_OP.findall(rest),
+                'remark'     : pending_remark.pop(name, ''),
             })
             continue
 
@@ -703,9 +745,7 @@ def parse_running_config_acl(lines):
 
 
 def print_running_config_acl(cfg_rules, cfg_partials, unmatched):
-    """
-    Prints running-config ACL analysis with full feature inventory.
-    """
+    """Prints running-config ACL analysis with full feature inventory."""
     print("=" * 78)
     print("  RUNNING CONFIG ACL ANALYSIS  (show running-config access-list)")
     print("=" * 78)
@@ -716,7 +756,6 @@ def print_running_config_acl(cfg_rules, cfg_partials, unmatched):
             print(f"  {len(unmatched)} unmatched line(s) — see UNMATCHED section.")
         return
 
-    # Protocol inventory across all ACLs
     protocol_inventory = defaultdict(int)
 
     for name, rules in sorted(cfg_rules.items()):
@@ -751,7 +790,6 @@ def print_running_config_acl(cfg_rules, cfg_partials, unmatched):
             )
             print(f"     Log levels           : {lvl_str}")
 
-        # Inactive detail
         if inactive:
             print(f"\n     [FLAG] INACTIVE RULES in config:")
             for r in inactive:
@@ -759,21 +797,18 @@ def print_running_config_acl(cfg_rules, cfg_partials, unmatched):
                 print(f"       {r['action'].upper()} {r['protocol']}"
                       f"  {r['rest'][:55]}{rm}")
 
-        # Time-range detail
         if tr_rules:
             tr_names = sorted(set(
                 r['time_range'] for r in tr_rules if r['time_range']
             ))
             print(f"\n     [INFO] Time-range references: {', '.join(tr_names)}")
 
-        # Partials
         partials = cfg_partials.get(name, [])
         if partials:
             print(f"\n     [PARTIAL] {len(partials)} partially matched line(s):")
             for p in partials:
                 print(f"       {p[:75]}")
 
-    # Protocol inventory
     if protocol_inventory:
         print(f"\n  {'='*78}")
         print(f"  PROTOCOL INVENTORY ACROSS ALL ACLs")
@@ -783,14 +818,12 @@ def print_running_config_acl(cfg_rules, cfg_partials, unmatched):
         for proto, count in sorted(
             protocol_inventory.items(), key=lambda x: -x[1]
         ):
-            unknown = '' if proto in ASA_PROTOCOLS else '  [VERIFY]'
+            unknown = '' if proto in ASA_PROTOCOLS else '  [VERIFY - non-standard protocol]'
             print(f"  {proto:<30} {count:>12}{unknown}")
 
-    # Unmatched
     if unmatched:
         print(f"\n  {'='*78}")
-        print(f"  UNMATCHED LINES IN RUNNING-CONFIG-ACCESS-LIST"
-              f" ({len(unmatched)} line(s))")
+        print(f"  UNMATCHED LINES IN RUNNING-CONFIG-ACCESS-LIST ({len(unmatched)})")
         print(f"  {'='*78}")
         for u in unmatched[:20]:
             print(f"    {u[:75]}")
@@ -803,164 +836,74 @@ def print_running_config_acl(cfg_rules, cfg_partials, unmatched):
 # PARSER 3: RUNNING-CONFIG-CRYPTO
 # ════════════════════════════════════════════════════════════
 
-# ── IKEv1 policy block ────────────────────────────────────────
-# crypto ikev1 policy <priority>
-RE_IKEv1_POLICY = re.compile(
-    r'^crypto ikev1 policy\s+(\d+)',
-    re.IGNORECASE
-)
-# Sub-commands inside ikev1 policy block
-RE_IKEv1_ENC  = re.compile(r'^\s*encryption\s+(\S+)', re.IGNORECASE)
-RE_IKEv1_HASH = re.compile(r'^\s*hash\s+(\S+)', re.IGNORECASE)
-RE_IKEv1_AUTH = re.compile(r'^\s*authentication\s+(\S+)', re.IGNORECASE)
-RE_IKEv1_GROUP= re.compile(r'^\s*group\s+(\d+)', re.IGNORECASE)
-RE_IKEv1_LIFE = re.compile(r'^\s*lifetime\s+(\d+)', re.IGNORECASE)
-
-# ── IKEv2 policy block ────────────────────────────────────────
-# crypto ikev2 policy <priority>
-RE_IKEv2_POLICY = re.compile(
-    r'^crypto ikev2 policy\s+(\d+)',
-    re.IGNORECASE
-)
-RE_IKEv2_ENC   = re.compile(r'^\s*encryption\s+(.+)', re.IGNORECASE)
-RE_IKEv2_INT   = re.compile(r'^\s*integrity\s+(.+)', re.IGNORECASE)
-RE_IKEv2_PRF   = re.compile(r'^\s*prf\s+(.+)', re.IGNORECASE)
-RE_IKEv2_GROUP = re.compile(r'^\s*group\s+(.+)', re.IGNORECASE)
-RE_IKEv2_LIFE  = re.compile(r'^\s*lifetime\s+seconds\s+(\d+)', re.IGNORECASE)
-
-# ── IKEv1 transform sets ──────────────────────────────────────
-# crypto ipsec ikev1 transform-set <name> <esp-enc> [<esp-hash>] [mode transport]
-RE_IKEv1_TS = re.compile(
-    r'^crypto ipsec ikev1 transform-set\s+(\S+)\s+(\S+)(?:\s+(\S+))?',
-    re.IGNORECASE
-)
-RE_TS_MODE = re.compile(
-    r'^crypto ipsec ikev1 transform-set\s+\S+.*\s+mode\s+(transport|tunnel)',
-    re.IGNORECASE
-)
-
-# ── IKEv2 IPsec proposals ─────────────────────────────────────
-# crypto ipsec ikev2 ipsec-proposal <name>
-RE_IKEv2_PROP = re.compile(
-    r'^crypto ipsec ikev2 ipsec-proposal\s+(\S+)',
-    re.IGNORECASE
-)
-RE_PROP_ENC = re.compile(r'^\s*protocol esp encryption\s+(.+)', re.IGNORECASE)
-RE_PROP_INT = re.compile(r'^\s*protocol esp integrity\s+(.+)', re.IGNORECASE)
-RE_PROP_AH  = re.compile(r'^\s*protocol ah\s+(.+)', re.IGNORECASE)
-
-# ── IPsec profile ─────────────────────────────────────────────
-# crypto ipsec profile <name>
-RE_IPSEC_PROFILE = re.compile(
-    r'^crypto ipsec profile\s+(\S+)',
-    re.IGNORECASE
-)
-
-# ── IPsec global settings ─────────────────────────────────────
-RE_IPSEC_GLOBAL = re.compile(
-    r'^crypto ipsec\s+(?!ikev1|ikev2|profile)(.+)',
-    re.IGNORECASE
-)
-
-# ── IKE enable statements ─────────────────────────────────────
-# crypto ikev1 enable <interface>
-# crypto ikev2 enable <interface>
-RE_IKE_ENABLE = re.compile(
-    r'^crypto (ikev1|ikev2) enable\s+(\S+)',
-    re.IGNORECASE
-)
-
-# ── Dynamic map ───────────────────────────────────────────────
-# crypto dynamic-map <name> <seq> <verb> <rest>
-RE_DYN_MAP = re.compile(
-    r'^crypto dynamic-map\s+(\S+)\s+(\d+)\s+(.+)',
-    re.IGNORECASE
-)
-
-# ── Static crypto map ─────────────────────────────────────────
-# crypto map <name> <seq> <verb> <rest>
-RE_CRYPTO_MAP = re.compile(
-    r'^crypto map\s+(\S+)\s+(\d+)\s+(match|set|interface|ipsec-isakmp)(\s+.+)?$',
-    re.IGNORECASE
-)
-
-# crypto map <name> interface <iface>
-RE_CRYPTO_MAP_IFACE = re.compile(
-    r'^crypto map\s+(\S+)\s+interface\s+(\S+)',
-    re.IGNORECASE
-)
-
-# ── IKEv1 ISAKMP policy (legacy syntax) ──────────────────────
-# crypto isakmp policy <priority>
-RE_ISAKMP_POLICY = re.compile(
-    r'^crypto isakmp policy\s+(\d+)',
-    re.IGNORECASE
-)
-# crypto isakmp enable / key / identity etc.
-RE_ISAKMP_GLOBAL = re.compile(
-    r'^crypto isakmp\s+(?!policy)(.+)',
-    re.IGNORECASE
-)
-
-# ── SA lifetime ───────────────────────────────────────────────
-RE_SA_LIFETIME = re.compile(
-    r'^crypto ipsec security-association\s+(lifetime|pmtu-aging)\s+(.+)',
-    re.IGNORECASE
-)
-
-# ── Partial: any crypto line ──────────────────────────────────
-RE_CRYPTO_PARTIAL = re.compile(r'^crypto\s+', re.IGNORECASE)
-
-
 def parse_crypto(lines):
     """
     Parses 'show running-config crypto' output.
-    Covers ALL documented ASA crypto syntax variants.
+    Covers ALL documented ASA crypto syntax variants including
+    PKI trustpoints, certificate chains, and CA pool policy.
 
     Returns:
-      ikev1_policies  : [ policy_dict ]
-      ikev2_policies  : [ policy_dict ]
-      ikev1_ts        : [ ts_dict ]
-      ikev2_proposals : [ proposal_dict ]
-      ipsec_profiles  : [ profile_dict ]
-      dynamic_maps    : { name: [ entry_dict ] }
-      crypto_maps     : { name: { seq: entry_dict } }
-      ike_enables     : { version: [ interface ] }
-      map_interfaces  : { map_name: interface }
-      isakmp_globals  : [ line ]
-      ipsec_globals   : [ line ]
-      sa_settings     : [ line ]
-      partials        : [ line ]
-      unmatched       : [ line ]
+      ikev1_policies    : [ policy_dict ]
+      ikev2_policies    : [ policy_dict ]
+      ikev1_ts          : [ ts_dict ]
+      ikev2_proposals   : [ proposal_dict ]
+      ipsec_profiles    : [ profile_dict ]
+      dynamic_maps      : { name: [ entry_dict ] }
+      crypto_maps       : { name: { seq: entry_dict } }
+      ike_enables       : { version: [ interface ] }
+      map_interfaces    : { map_name: interface }
+      isakmp_globals    : [ line ]
+      ipsec_globals     : [ line ]
+      sa_settings       : [ line ]
+      pki_trustpoints   : [ trustpoint_dict ]
+      pki_cert_chains   : [ cert_chain_dict ]
+      pki_ra_trustpoint : str or None
+      pki_trustpool     : [ line ]
+      ikev1_am_disable  : bool
+      partials          : [ line ]
+      unmatched         : [ line ]
     """
-    ikev1_policies  = []
-    ikev2_policies  = []
-    ikev1_ts        = []
-    ikev2_proposals = []
-    ipsec_profiles  = []
-    dynamic_maps    = defaultdict(list)
-    crypto_maps     = defaultdict(lambda: defaultdict(dict))
-    ike_enables     = defaultdict(list)
-    map_interfaces  = {}
-    isakmp_globals  = []
-    ipsec_globals   = []
-    sa_settings     = []
-    partials        = []
-    unmatched       = []
+    ikev1_policies    = []
+    ikev2_policies    = []
+    ikev1_ts          = []
+    ikev2_proposals   = []
+    ipsec_profiles    = []
+    dynamic_maps      = defaultdict(list)
+    crypto_maps       = defaultdict(lambda: defaultdict(dict))
+    ike_enables       = defaultdict(list)
+    map_interfaces    = {}
+    isakmp_globals    = []
+    ipsec_globals     = []
+    sa_settings       = []
+    pki_trustpoints   = []
+    pki_cert_chains   = []
+    pki_ra_trustpoint = None
+    pki_trustpool     = []
+    ikev1_am_disable  = False
+    partials          = []
+    unmatched         = []
 
-    # State tracking for multi-line blocks
+    # Block state
     current_ikev1_policy  = None
     current_ikev2_policy  = None
     current_ikev2_prop    = None
     current_ipsec_profile = None
+    current_trustpoint    = None
+    current_cert_chain    = None
+    in_cert_chain         = False
 
-    def reset_block_state():
+    def reset_all():
         nonlocal current_ikev1_policy, current_ikev2_policy
         nonlocal current_ikev2_prop, current_ipsec_profile
+        nonlocal current_trustpoint, current_cert_chain
+        nonlocal in_cert_chain
         current_ikev1_policy  = None
         current_ikev2_policy  = None
         current_ikev2_prop    = None
         current_ipsec_profile = None
+        current_trustpoint    = None
+        current_cert_chain    = None
+        in_cert_chain         = False
 
     for line in lines:
         if not line.strip():
@@ -968,10 +911,138 @@ def parse_crypto(lines):
 
         stripped = line.strip()
 
+        # ── Certificate chain content ─────────────────────────
+        # Must check FIRST — cert content can look like anything
+        if in_cert_chain:
+            if stripped.lower() == 'quit':
+                in_cert_chain = False
+                continue
+            m = RE_CERT_SERIAL.match(stripped)
+            if m:
+                if current_cert_chain is not None:
+                    current_cert_chain['cert_serials'].append(m.group(1))
+                continue
+            # Base64 content — count lines, never store content
+            if current_cert_chain is not None:
+                current_cert_chain['content_lines'] += 1
+            continue
+
+        # ── IKEv1 am-disable ──────────────────────────────────
+        if RE_IKEv1_AM_DISABLE.match(stripped):
+            ikev1_am_disable = True
+            reset_all()
+            continue
+
+        # ── IKEv2 RA VPN trustpoint ───────────────────────────
+        m = RE_IKEv2_RA_TRUSTPOINT.match(stripped)
+        if m:
+            pki_ra_trustpoint = m.group(1)
+            reset_all()
+            continue
+
+        # ── crypto ca trustpool ───────────────────────────────
+        m = RE_CA_TRUSTPOOL.match(stripped)
+        if m:
+            pki_trustpool.append(stripped)
+            reset_all()
+            continue
+
+        # ── crypto ca trustpoint header ───────────────────────
+        m = RE_CA_TRUSTPOINT.match(stripped)
+        if m:
+            reset_all()
+            current_trustpoint = {
+                'name'         : m.group(1),
+                'enrollment'   : None,
+                'revocation'   : None,
+                'subject'      : None,
+                'usage'        : [],
+                'keypair'      : None,
+                'fqdn'         : None,
+                'ip_address'   : None,
+                'crl_config'   : False,
+                'no_validation': False,
+                'other'        : [],
+            }
+            pki_trustpoints.append(current_trustpoint)
+            continue
+
+        # ── Trustpoint sub-commands (indented lines) ──────────
+        if current_trustpoint is not None:
+            is_indented = line.startswith(' ') or line.startswith('\t')
+
+            if is_indented:
+                m = RE_TP_ENROLLMENT.match(line)
+                if m:
+                    current_trustpoint['enrollment'] = m.group(1).strip()
+                    continue
+
+                m = RE_TP_REVOCATION.match(line)
+                if m:
+                    current_trustpoint['revocation'] = m.group(1).strip()
+                    continue
+
+                m = RE_TP_SUBJECT.match(line)
+                if m:
+                    current_trustpoint['subject'] = m.group(1).strip()
+                    continue
+
+                m = RE_TP_USAGE.match(line)
+                if m:
+                    current_trustpoint['usage'].extend(
+                        m.group(1).strip().split()
+                    )
+                    continue
+
+                m = RE_TP_KEYPAIR.match(line)
+                if m:
+                    current_trustpoint['keypair'] = m.group(1)
+                    continue
+
+                m = RE_TP_FQDN.match(line)
+                if m:
+                    current_trustpoint['fqdn'] = m.group(1)
+                    continue
+
+                m = RE_TP_IP.match(line)
+                if m:
+                    current_trustpoint['ip_address'] = m.group(1)
+                    continue
+
+                if RE_TP_CRL.match(line):
+                    current_trustpoint['crl_config'] = True
+                    continue
+
+                if RE_TP_NO_VALIDATE.match(line):
+                    current_trustpoint['no_validation'] = True
+                    continue
+
+                # Any other indented line inside trustpoint
+                current_trustpoint['other'].append(stripped)
+                continue
+
+            else:
+                # Non-indented = trustpoint block ended
+                current_trustpoint = None
+                # Fall through to process this line normally
+
+        # ── crypto ca certificate chain header ────────────────
+        m = RE_CA_CERT_CHAIN.match(stripped)
+        if m:
+            reset_all()
+            current_cert_chain = {
+                'trustpoint'   : m.group(1),
+                'cert_serials' : [],
+                'content_lines': 0,
+            }
+            pki_cert_chains.append(current_cert_chain)
+            in_cert_chain = True
+            continue
+
         # ── IKEv1 policy header ───────────────────────────────
         m = RE_IKEv1_POLICY.match(stripped)
         if m:
-            reset_block_state()
+            reset_all()
             current_ikev1_policy = {
                 'priority'  : int(m.group(1)),
                 'encryption': None,
@@ -985,31 +1056,31 @@ def parse_crypto(lines):
 
         # ── IKEv1 policy sub-commands ─────────────────────────
         if current_ikev1_policy:
-            if RE_IKEv1_ENC.match(stripped):
-                current_ikev1_policy['encryption'] = \
-                    RE_IKEv1_ENC.match(stripped).group(1).lower()
+            m = RE_IKEv1_ENC.match(stripped)
+            if m:
+                current_ikev1_policy['encryption'] = m.group(1).lower()
                 continue
-            if RE_IKEv1_HASH.match(stripped):
-                current_ikev1_policy['hash'] = \
-                    RE_IKEv1_HASH.match(stripped).group(1).lower()
+            m = RE_IKEv1_HASH.match(stripped)
+            if m:
+                current_ikev1_policy['hash'] = m.group(1).lower()
                 continue
-            if RE_IKEv1_AUTH.match(stripped):
-                current_ikev1_policy['auth'] = \
-                    RE_IKEv1_AUTH.match(stripped).group(1).lower()
+            m = RE_IKEv1_AUTH.match(stripped)
+            if m:
+                current_ikev1_policy['auth'] = m.group(1).lower()
                 continue
-            if RE_IKEv1_GROUP.match(stripped):
-                current_ikev1_policy['group'] = \
-                    RE_IKEv1_GROUP.match(stripped).group(1)
+            m = RE_IKEv1_GROUP.match(stripped)
+            if m:
+                current_ikev1_policy['group'] = m.group(1)
                 continue
-            if RE_IKEv1_LIFE.match(stripped):
-                current_ikev1_policy['lifetime'] = \
-                    RE_IKEv1_LIFE.match(stripped).group(1)
+            m = RE_IKEv1_LIFE.match(stripped)
+            if m:
+                current_ikev1_policy['lifetime'] = m.group(1)
                 continue
 
         # ── IKEv2 policy header ───────────────────────────────
         m = RE_IKEv2_POLICY.match(stripped)
         if m:
-            reset_block_state()
+            reset_all()
             current_ikev2_policy = {
                 'priority'  : int(m.group(1)),
                 'encryption': [],
@@ -1023,69 +1094,67 @@ def parse_crypto(lines):
 
         # ── IKEv2 policy sub-commands ─────────────────────────
         if current_ikev2_policy:
-            if RE_IKEv2_ENC.match(stripped):
-                algs = RE_IKEv2_ENC.match(stripped).group(1).split()
+            m = RE_IKEv2_ENC.match(stripped)
+            if m:
                 current_ikev2_policy['encryption'].extend(
-                    [a.lower() for a in algs]
+                    [a.lower() for a in m.group(1).split()]
                 )
                 continue
-            if RE_IKEv2_INT.match(stripped):
-                algs = RE_IKEv2_INT.match(stripped).group(1).split()
+            m = RE_IKEv2_INT.match(stripped)
+            if m:
                 current_ikev2_policy['integrity'].extend(
-                    [a.lower() for a in algs]
+                    [a.lower() for a in m.group(1).split()]
                 )
                 continue
-            if RE_IKEv2_PRF.match(stripped):
-                algs = RE_IKEv2_PRF.match(stripped).group(1).split()
+            m = RE_IKEv2_PRF.match(stripped)
+            if m:
                 current_ikev2_policy['prf'].extend(
-                    [a.lower() for a in algs]
+                    [a.lower() for a in m.group(1).split()]
                 )
                 continue
-            if RE_IKEv2_GROUP.match(stripped):
-                grps = RE_IKEv2_GROUP.match(stripped).group(1).split()
-                current_ikev2_policy['group'].extend(grps)
+            m = RE_IKEv2_GROUP.match(stripped)
+            if m:
+                current_ikev2_policy['group'].extend(m.group(1).split())
                 continue
-            if RE_IKEv2_LIFE.match(stripped):
-                current_ikev2_policy['lifetime'] = \
-                    RE_IKEv2_LIFE.match(stripped).group(1)
+            m = RE_IKEv2_LIFE.match(stripped)
+            if m:
+                current_ikev2_policy['lifetime'] = m.group(1)
                 continue
 
-        # ── IKEv1 transform set ───────────────────────────────
+        # ── IKEv1 transform sets ──────────────────────────────
         m = RE_IKEv1_TS.match(stripped)
         if m:
-            reset_block_state()
+            reset_all()
             name     = m.group(1)
             esp_enc  = m.group(2).lower()
             esp_hash = m.group(3).lower() if m.group(3) else None
 
-            # Check for mode transport on same line
             mode = 'tunnel'
             mode_m = RE_TS_MODE.match(stripped)
             if mode_m:
                 mode = mode_m.group(1).lower()
-                # Remove mode token from hash if accidentally captured
                 if esp_hash and esp_hash in ('transport', 'tunnel', 'mode'):
                     esp_hash = None
 
             ikev1_ts.append({
-                'name'      : name,
-                'esp_enc'   : esp_enc,
-                'esp_hash'  : esp_hash,
-                'mode'      : mode,
-                'ftd_enc'   : ftd_enc_status(esp_enc),
-                'ftd_hash'  : ftd_int_status(esp_hash) if esp_hash else 'N/A',
+                'name'    : name,
+                'esp_enc' : esp_enc,
+                'esp_hash': esp_hash,
+                'mode'    : mode,
+                'ftd_enc' : ftd_enc_status(esp_enc),
+                'ftd_hash': ftd_int_status(esp_hash) if esp_hash else 'N/A',
             })
             continue
 
         # ── IKEv2 proposal header ─────────────────────────────
         m = RE_IKEv2_PROP.match(stripped)
         if m:
-            reset_block_state()
+            reset_all()
             current_ikev2_prop = {
-                'name'       : m.group(1),
-                'encryption' : [],
-                'integrity'  : [],
-                'ah'         : [],
+                'name'      : m.group(1),
+                'encryption': [],
+                'integrity' : [],
+                'ah'        : [],
             }
             ikev2_proposals.append(current_ikev2_prop)
             continue
@@ -1094,16 +1163,14 @@ def parse_crypto(lines):
         if current_ikev2_prop:
             m = RE_PROP_ENC.match(stripped)
             if m:
-                algs = m.group(1).strip().split()
                 current_ikev2_prop['encryption'].extend(
-                    [a.lower() for a in algs]
+                    [a.lower() for a in m.group(1).strip().split()]
                 )
                 continue
             m = RE_PROP_INT.match(stripped)
             if m:
-                algs = m.group(1).strip().split()
                 current_ikev2_prop['integrity'].extend(
-                    [a.lower() for a in algs]
+                    [a.lower() for a in m.group(1).strip().split()]
                 )
                 continue
             m = RE_PROP_AH.match(stripped)
@@ -1114,7 +1181,7 @@ def parse_crypto(lines):
         # ── IPsec profile header ──────────────────────────────
         m = RE_IPSEC_PROFILE.match(stripped)
         if m:
-            reset_block_state()
+            reset_all()
             current_ipsec_profile = {
                 'name'    : m.group(1),
                 'settings': [],
@@ -1132,40 +1199,38 @@ def parse_crypto(lines):
         # ── IKE enable statements ─────────────────────────────
         m = RE_IKE_ENABLE.match(stripped)
         if m:
-            reset_block_state()
+            reset_all()
             ike_enables[m.group(1).lower()].append(m.group(2))
             continue
 
         # ── Crypto map interface binding ──────────────────────
         m = RE_CRYPTO_MAP_IFACE.match(stripped)
         if m:
-            reset_block_state()
+            reset_all()
             map_interfaces[m.group(1)] = m.group(2)
             continue
 
         # ── Dynamic map ───────────────────────────────────────
         m = RE_DYN_MAP.match(stripped)
         if m:
-            reset_block_state()
-            map_name = m.group(1)
-            seq      = m.group(2)
-            rest_str = m.group(3).strip()
-
-            # Parse set sub-commands
-            dh_flag = ''
-            weak_flag = ''
+            reset_all()
+            map_name   = m.group(1)
+            seq        = m.group(2)
+            rest_str   = m.group(3).strip()
             rest_lower = rest_str.lower()
+
+            dh_flag = weak_flag = ''
 
             if 'pfs' in rest_lower:
                 grp_m = re.search(r'group\s*(\d+)', rest_lower)
                 if grp_m:
-                    grp = grp_m.group(1)
-                    status = ftd_dh_status(grp)
+                    g = grp_m.group(1)
+                    status = ftd_dh_status(g)
                     if status != 'OK':
-                        dh_flag = f" [{FTD_STATUS_SYMBOL[status]} DH group{grp}]"
+                        dh_flag = f" [{risk_symbol(status)} DH group{g}]"
 
-            for alg in ['3des', 'des', 'md5', 'esp-des', 'esp-3des',
-                        'esp-md5-hmac']:
+            for alg in ['3des', 'des', 'md5', 'esp-des',
+                        'esp-3des', 'esp-md5-hmac']:
                 if alg in rest_lower:
                     weak_flag = f" [WEAK: {alg}]"
                     break
@@ -1181,7 +1246,7 @@ def parse_crypto(lines):
         # ── Static crypto map ─────────────────────────────────
         m = RE_CRYPTO_MAP.match(stripped)
         if m:
-            reset_block_state()
+            reset_all()
             map_name  = m.group(1)
             seq       = int(m.group(2))
             verb      = m.group(3).lower()
@@ -1202,19 +1267,17 @@ def parse_crypto(lines):
 
             entry = crypto_maps[map_name][seq]
             entry['raw'].append(f"{verb} {remainder}")
-
             r_lower = remainder.lower()
+
             if verb == 'match' and r_lower.startswith('address'):
                 entry['match_acl'] = remainder.split()[-1]
             elif verb == 'set':
                 if r_lower.startswith('peer'):
                     entry['peers'].append(remainder.split()[-1])
                 elif 'ikev1 transform-set' in r_lower:
-                    ts_names = remainder.split()[2:]
-                    entry['ikev1_ts'].extend(ts_names)
+                    entry['ikev1_ts'].extend(remainder.split()[2:])
                 elif 'ikev2 ipsec-proposal' in r_lower:
-                    prop_names = remainder.split()[2:]
-                    entry['ikev2_prop'].extend(prop_names)
+                    entry['ikev2_prop'].extend(remainder.split()[2:])
                 elif r_lower.startswith('pfs'):
                     entry['pfs'] = remainder
                 elif r_lower.startswith('security-association lifetime'):
@@ -1227,32 +1290,26 @@ def parse_crypto(lines):
         # ── SA lifetime / global IPsec settings ───────────────
         m = RE_SA_LIFETIME.match(stripped)
         if m:
-            reset_block_state()
+            reset_all()
             sa_settings.append(stripped)
             continue
 
         m = RE_IPSEC_GLOBAL.match(stripped)
         if m:
-            reset_block_state()
+            reset_all()
             ipsec_globals.append(stripped)
             continue
 
         # ── Legacy ISAKMP ─────────────────────────────────────
-        m = RE_ISAKMP_POLICY.match(stripped)
-        if m:
-            reset_block_state()
-            isakmp_globals.append(stripped)
-            continue
-
-        m = RE_ISAKMP_GLOBAL.match(stripped)
-        if m:
-            reset_block_state()
+        if RE_ISAKMP_POLICY.match(stripped) or \
+           RE_ISAKMP_GLOBAL.match(stripped):
+            reset_all()
             isakmp_globals.append(stripped)
             continue
 
         # ── Partial ───────────────────────────────────────────
         if RE_CRYPTO_PARTIAL.match(stripped):
-            reset_block_state()
+            reset_all()
             partials.append(stripped)
             continue
 
@@ -1266,9 +1323,227 @@ def parse_crypto(lines):
         crypto_maps, ike_enables,
         map_interfaces, isakmp_globals,
         ipsec_globals, sa_settings,
+        pki_trustpoints, pki_cert_chains,
+        pki_ra_trustpoint, pki_trustpool,
+        ikev1_am_disable,
         partials, unmatched,
     )
 
+
+# ════════════════════════════════════════════════════════════
+# PKI PRINT FUNCTION
+# ════════════════════════════════════════════════════════════
+
+def print_pki_section(pki_trustpoints, pki_cert_chains,
+                      pki_ra_trustpoint, pki_trustpool,
+                      ikev1_am_disable, risk_high, risk_info):
+    """
+    Prints PKI/certificate infrastructure analysis with
+    FTD migration requirements. Called from print_crypto.
+    """
+    print(f"\n  ── PKI / CERTIFICATE INFRASTRUCTURE " + "─" * 38)
+
+    # ── IKEv1 aggressive mode ─────────────────────────────────
+    if ikev1_am_disable:
+        print(f"\n     [OK] crypto ikev1 am-disable is set.")
+        print(f"     IKEv1 aggressive mode is disabled on this ASA.")
+        print(f"     FTD disables aggressive mode by default — this")
+        print(f"     setting carries over implicitly, no action needed.")
+    else:
+        print(f"\n     [INFO] crypto ikev1 am-disable is NOT set.")
+        print(f"     IKEv1 aggressive mode may be enabled.")
+        print(f"     FTD disables it by default — verify no peers")
+        print(f"     require aggressive mode before migration.")
+        risk_info.append(
+            "IKEv1 aggressive mode not explicitly disabled on ASA — "
+            "FTD disables by default, verify no peer dependency"
+        )
+
+    # ── RA VPN trustpoint ─────────────────────────────────────
+    if pki_ra_trustpoint:
+        print(f"\n     [CRITICAL] RA VPN Trustpoint: {pki_ra_trustpoint}")
+        print(f"     Used for IKEv2 remote-access VPN (AnyConnect)")
+        print(f"     device authentication.")
+        print(f"     MIGRATION REQUIREMENT: This trustpoint and its")
+        print(f"     certificate chain MUST be exported from the ASA")
+        print(f"     and imported into FMC before AnyConnect will")
+        print(f"     authenticate successfully post-migration.")
+        risk_high.append(
+            f"RA VPN trustpoint '{pki_ra_trustpoint}' must be exported "
+            "from ASA and imported into FMC — AnyConnect will fail "
+            "without this"
+        )
+
+    # ── Trustpoints ───────────────────────────────────────────
+    print(f"\n     TRUSTPOINTS ({len(pki_trustpoints)} configured)")
+    print(f"     " + "=" * 65)
+
+    if not pki_trustpoints:
+        print(f"     None detected.")
+    else:
+        for tp in pki_trustpoints:
+            is_ra_tp = (
+                pki_ra_trustpoint and
+                tp['name'].lower() == pki_ra_trustpoint.lower()
+            )
+            ra_marker = '  <- RA VPN TRUSTPOINT' if is_ra_tp else ''
+
+            print(f"\n     Trustpoint : {tp['name']}{ra_marker}")
+
+            enroll = tp['enrollment'] or '(not specified)'
+            print(f"       Enrollment   : {enroll}")
+
+            revoke = tp['revocation'] or '(not specified)'
+            print(f"       Revocation   : {revoke}")
+
+            if tp['subject']:
+                print(f"       Subject      : {tp['subject']}")
+
+            usage_str = ', '.join(tp['usage']) if tp['usage'] \
+                else '(general-purpose / not specified)'
+            print(f"       Usage        : {usage_str}")
+
+            if tp['keypair']:
+                print(f"       Keypair      : {tp['keypair']}")
+            if tp['fqdn']:
+                print(f"       FQDN         : {tp['fqdn']}")
+            if tp['ip_address']:
+                print(f"       IP Address   : {tp['ip_address']}")
+            if tp['crl_config']:
+                print(f"       CRL          : configured")
+            if tp['no_validation']:
+                print(f"       Validation   : disabled (no validation-usage)")
+                risk_info.append(
+                    f"Trustpoint '{tp['name']}' has no validation-usage — "
+                    "verify certificate validation behavior in FMC"
+                )
+            if tp['other']:
+                print(f"       Other settings:")
+                for o in tp['other']:
+                    print(f"         {o}")
+
+            # Per-trustpoint migration notes
+            notes = []
+
+            enroll_lower = enroll.lower()
+            if enroll_lower == 'terminal':
+                notes.append(
+                    "Enrolled via terminal (manual paste) — certificate "
+                    "must be manually exported and re-imported into FMC"
+                )
+            elif 'url' in enroll_lower:
+                notes.append(
+                    "SCEP enrollment URL configured — verify FTD/FMC "
+                    "can reach the CA at the same URL post-migration"
+                )
+            elif enroll_lower == 'self':
+                notes.append(
+                    "Self-signed certificate — regenerate on FTD or "
+                    "import the existing cert if peers trust this specific cert"
+                )
+
+            revoke_lower = revoke.lower()
+            if 'crl' in revoke_lower:
+                notes.append(
+                    "CRL revocation checking — verify FTD can reach "
+                    "the CRL distribution point post-migration"
+                )
+            elif 'ocsp' in revoke_lower:
+                notes.append(
+                    "OCSP revocation checking — verify FTD can reach "
+                    "the OCSP responder post-migration"
+                )
+            elif 'none' in revoke_lower:
+                notes.append(
+                    "Revocation checking disabled (none) — FMC default "
+                    "enables CRL checking; configure to match on FTD"
+                )
+
+            if is_ra_tp:
+                risk_high.append(
+                    f"Trustpoint '{tp['name']}' (RA VPN) — "
+                    "must be migrated to FMC before AnyConnect cutover"
+                )
+
+            if notes:
+                print(f"       Migration notes:")
+                for n in notes:
+                    print(f"         * {n}")
+
+    # ── Certificate chains ────────────────────────────────────
+    print(f"\n     CERTIFICATE CHAINS ({len(pki_cert_chains)} present)")
+    print(f"     " + "=" * 65)
+
+    if not pki_cert_chains:
+        print(f"     None detected.")
+    else:
+        for chain in pki_cert_chains:
+            serials = ', '.join(chain['cert_serials']) \
+                if chain['cert_serials'] else '(serials not captured)'
+            print(f"\n     Chain trustpoint : {chain['trustpoint']}")
+            print(f"       Cert serials     : {serials}")
+            print(f"       Content lines    : {chain['content_lines']}"
+                  f"  (base64 data — not stored)")
+
+    # ── CA trustpool ──────────────────────────────────────────
+    if pki_trustpool:
+        print(f"\n     CA TRUSTPOOL POLICY")
+        print(f"     " + "=" * 65)
+        for line in pki_trustpool:
+            print(f"     {line}")
+        risk_info.append(
+            "CA trustpool policy configured — verify FMC trustpool "
+            "settings match post-migration"
+        )
+
+    # ── PKI migration checklist ───────────────────────────────
+    print(f"\n     PKI MIGRATION CHECKLIST")
+    print(f"     " + "=" * 65)
+
+    checklist = []
+
+    if pki_trustpoints:
+        checklist.append(
+            f"Export all {len(pki_trustpoints)} trustpoint certificate(s) "
+            "from ASA using: crypto ca export <name> pkcs12 <password>"
+        )
+        checklist.append(
+            "Import exported certificates into FMC under: "
+            "Objects > PKI > Cert Enrollment"
+        )
+
+    if pki_ra_trustpoint:
+        checklist.append(
+            f"Assign RA VPN trustpoint '{pki_ra_trustpoint}' to "
+            "AnyConnect Connection Profile in FMC before AnyConnect testing"
+        )
+
+    if any('url' in (tp['enrollment'] or '').lower()
+           for tp in pki_trustpoints):
+        checklist.append(
+            "Verify FTD management interface can reach all SCEP "
+            "CA enrollment URLs for automatic certificate renewal"
+        )
+
+    if any('crl' in (tp['revocation'] or '').lower()
+           for tp in pki_trustpoints):
+        checklist.append(
+            "Verify FTD data interfaces can reach CRL distribution "
+            "points for certificate revocation checking"
+        )
+
+    if checklist:
+        for i, item in enumerate(checklist, 1):
+            print(f"     {i}. {item}")
+    else:
+        print(f"     No PKI migration items identified.")
+
+    print()
+
+
+# ════════════════════════════════════════════════════════════
+# CRYPTO PRINT FUNCTION
+# ════════════════════════════════════════════════════════════
 
 def print_crypto(ikev1_policies, ikev2_policies,
                  ikev1_ts, ikev2_proposals,
@@ -1276,22 +1551,32 @@ def print_crypto(ikev1_policies, ikev2_policies,
                  crypto_maps, ike_enables,
                  map_interfaces, isakmp_globals,
                  ipsec_globals, sa_settings,
+                 pki_trustpoints, pki_cert_chains,
+                 pki_ra_trustpoint, pki_trustpool,
+                 ikev1_am_disable,
                  partials, unmatched):
-    """
-    Prints full crypto analysis with FTD compatibility assessment.
-    """
+    """Prints full crypto analysis with FTD compatibility assessment."""
+
     print("=" * 78)
     print("  CRYPTO ANALYSIS  (show running-config crypto)")
     print("=" * 78)
 
-    # Track all risk items for final summary
+    # Risk tracking lists — populated throughout, printed at end
     risk_high   = []
     risk_medium = []
     risk_info   = []
 
+    # ── PKI section ───────────────────────────────────────────
+    print_pki_section(
+        pki_trustpoints, pki_cert_chains,
+        pki_ra_trustpoint, pki_trustpool,
+        ikev1_am_disable,
+        risk_high, risk_info
+    )
+
     # ── IKE enable status ─────────────────────────────────────
     if ike_enables:
-        print(f"\n  ── IKE ENABLED INTERFACES " + "─" * 45)
+        print(f"\n  ── IKE ENABLED INTERFACES " + "─" * 47)
         for ver, ifaces in sorted(ike_enables.items()):
             for iface in ifaces:
                 print(f"     {ver.upper()} enabled on: {iface}")
@@ -1302,9 +1587,8 @@ def print_crypto(ikev1_policies, ikev2_policies,
     if not ikev1_policies:
         print("     None configured.")
     else:
-        hdr = (f"  {'PRI':>5}  {'ENCRYPTION':<15} {'HASH':<10}"
-               f" {'AUTH':<12} {'DH GRP':>7} {'LIFETIME':>10}")
-        print(hdr)
+        print(f"  {'PRI':>5}  {'ENCRYPTION':<15} {'HASH':<10}"
+              f" {'AUTH':<12} {'DH GRP':>7} {'LIFETIME':>10}")
         print(f"  {'-'*5}  {'-'*14} {'-'*9} {'-'*11} {'-'*7} {'-'*10}")
 
         for pol in sorted(ikev1_policies, key=lambda x: x['priority']):
@@ -1314,31 +1598,29 @@ def print_crypto(ikev1_policies, ikev2_policies,
             group = pol['group']      or 'default(2)'
             life  = pol['lifetime']   or 'default(86400)'
 
-            enc_s = FTD_STATUS_SYMBOL.get(ftd_ike_enc_status(enc), '')
-            hsh_s = FTD_STATUS_SYMBOL.get(ftd_ike_hash_status(hsh), '')
-            dh_s  = FTD_STATUS_SYMBOL.get(ftd_dh_status(group), '')
-
             print(f"  {pol['priority']:>5}  {enc:<15} {hsh:<10}"
                   f" {auth:<12} {group:>7} {life:>10}")
 
-            flags = []
-            if 'REMOVED' in enc_s or 'DEPRECATED' in enc_s:
-                flags.append(f"Encryption: {enc_s}")
-            if 'REMOVED' in hsh_s or 'DEPRECATED' in hsh_s:
-                flags.append(f"Hash: {hsh_s}")
-            if 'REMOVED' in dh_s or 'DEPRECATED' in dh_s:
-                flags.append(f"DH group {group}: {dh_s}")
+            enc_s = ftd_ike_enc_status(enc)
+            hsh_s = ftd_ike_hash_status(hsh)
+            dh_s  = ftd_dh_status(group)
 
-            for f in flags:
-                print(f"          [FLAG] {f}")
-                if 'REMOVED' in f:
-                    risk_high.append(
-                        f"IKEv1 Policy {pol['priority']}: {f}"
+            for label, status in [
+                (f"Encryption '{enc}'", enc_s),
+                (f"Hash '{hsh}'", hsh_s),
+                (f"DH group {group}", dh_s),
+            ]:
+                if status in ('REMOVED', 'DEPRECATED'):
+                    sym = risk_symbol(status)
+                    print(f"          [FLAG] {label}: {sym}")
+                    entry = (
+                        f"IKEv1 Policy {pol['priority']} — "
+                        f"{label}: {status}"
                     )
-                else:
-                    risk_medium.append(
-                        f"IKEv1 Policy {pol['priority']}: {f}"
-                    )
+                    if status == 'REMOVED':
+                        risk_high.append(entry)
+                    else:
+                        risk_medium.append(entry)
 
     # ── IKEv2 Phase 1 policies ────────────────────────────────
     print(f"\n  ── IKEv2 PHASE 1 POLICIES ({len(ikev2_policies)}) " + "─" * 38)
@@ -1348,42 +1630,42 @@ def print_crypto(ikev1_policies, ikev2_policies,
     else:
         for pol in sorted(ikev2_policies, key=lambda x: x['priority']):
             print(f"\n     Priority  : {pol['priority']}")
-            enc_list = pol['encryption'] or ['default']
-            int_list = pol['integrity']  or ['default']
-            prf_list = pol['prf']        or ['same as integrity']
-            grp_list = pol['group']      or ['default']
 
-            for enc in enc_list:
-                s = FTD_STATUS_SYMBOL.get(ftd_ike_enc_status(enc), 'UNKNOWN')
-                print(f"     Encryption: {enc:<20} {s}")
-                if 'REMOVED' in s or 'DEPRECATED' in s:
-                    risk_high.append(
-                        f"IKEv2 Policy {pol['priority']} enc {enc}: {s}"
-                    ) if 'REMOVED' in s else risk_medium.append(
-                        f"IKEv2 Policy {pol['priority']} enc {enc}: {s}"
+            for enc in pol['encryption'] or ['default']:
+                s = ftd_ike_enc_status(enc)
+                print(f"     Encryption: {enc:<25} {risk_symbol(s)}")
+                if s in ('REMOVED', 'DEPRECATED'):
+                    entry = (
+                        f"IKEv2 Policy {pol['priority']} "
+                        f"enc '{enc}': {s}"
                     )
+                    risk_high.append(entry) if s == 'REMOVED' \
+                        else risk_medium.append(entry)
 
-            for alg in int_list:
-                s = FTD_STATUS_SYMBOL.get(ftd_ike_hash_status(alg), 'UNKNOWN')
-                print(f"     Integrity : {alg:<20} {s}")
-                if 'REMOVED' in s or 'DEPRECATED' in s:
-                    risk_high.append(
-                        f"IKEv2 Policy {pol['priority']} integrity {alg}: {s}"
-                    ) if 'REMOVED' in s else risk_medium.append(
-                        f"IKEv2 Policy {pol['priority']} integrity {alg}: {s}"
+            for alg in pol['integrity'] or ['default']:
+                s = ftd_ike_hash_status(alg)
+                print(f"     Integrity : {alg:<25} {risk_symbol(s)}")
+                if s in ('REMOVED', 'DEPRECATED'):
+                    entry = (
+                        f"IKEv2 Policy {pol['priority']} "
+                        f"integrity '{alg}': {s}"
                     )
+                    risk_high.append(entry) if s == 'REMOVED' \
+                        else risk_medium.append(entry)
 
-            print(f"     PRF       : {', '.join(prf_list)}")
+            if pol['prf']:
+                print(f"     PRF       : {', '.join(pol['prf'])}")
 
-            for grp in grp_list:
-                s = FTD_STATUS_SYMBOL.get(ftd_dh_status(grp), 'UNKNOWN')
-                print(f"     DH Group  : {grp:<20} {s}")
-                if 'REMOVED' in s or 'DEPRECATED' in s:
-                    risk_high.append(
-                        f"IKEv2 Policy {pol['priority']} DH group {grp}: {s}"
-                    ) if 'REMOVED' in s else risk_medium.append(
-                        f"IKEv2 Policy {pol['priority']} DH group {grp}: {s}"
+            for grp in pol['group'] or ['default']:
+                s = ftd_dh_status(grp)
+                print(f"     DH Group  : {grp:<25} {risk_symbol(s)}")
+                if s in ('REMOVED', 'DEPRECATED'):
+                    entry = (
+                        f"IKEv2 Policy {pol['priority']} "
+                        f"DH group {grp}: {s}"
                     )
+                    risk_high.append(entry) if s == 'REMOVED' \
+                        else risk_medium.append(entry)
 
             if pol['lifetime']:
                 print(f"     Lifetime  : {pol['lifetime']} seconds")
@@ -1394,39 +1676,38 @@ def print_crypto(ikev1_policies, ikev2_policies,
     if not ikev1_ts:
         print("     None configured.")
     else:
-        print(f"  {'NAME':<35} {'ESP-ENC':<20} {'ESP-HASH':<20}"
-              f" {'MODE':<10} {'ENC STATUS':<15} {'HASH STATUS'}")
-        print(f"  {'-'*34} {'-'*19} {'-'*19} {'-'*9} {'-'*14} {'-'*15}")
+        print(f"  {'NAME':<30} {'ESP-ENC':<20} {'ESP-HASH':<20}"
+              f" {'MODE':<10} {'ENC':<12} {'HASH'}")
+        print(f"  {'-'*29} {'-'*19} {'-'*19} {'-'*9} {'-'*11} {'-'*12}")
 
         weak_ts = set()
         for ts in ikev1_ts:
-            enc_s  = FTD_STATUS_SYMBOL.get(ts['ftd_enc'], 'UNKNOWN')
-            hash_s = FTD_STATUS_SYMBOL.get(ts['ftd_hash'], 'UNKNOWN')
+            enc_s  = risk_symbol(ts['ftd_enc'])
+            hash_s = risk_symbol(ts['ftd_hash'])
+            hash_str = ts['esp_hash'] or '(none)'
 
-            esp_hash_str = ts['esp_hash'] or '(none)'
-
-            print(f"  {ts['name']:<35} {ts['esp_enc']:<20}"
-                  f" {esp_hash_str:<20} {ts['mode']:<10}"
-                  f" {enc_s:<15} {hash_s}")
+            print(f"  {ts['name']:<30} {ts['esp_enc']:<20}"
+                  f" {hash_str:<20} {ts['mode']:<10}"
+                  f" {enc_s:<12} {hash_s}")
 
             if ts['ftd_enc'] in ('REMOVED', 'DEPRECATED') or \
                ts['ftd_hash'] in ('REMOVED', 'DEPRECATED'):
                 weak_ts.add(ts['name'])
-                if ts['ftd_enc'] == 'REMOVED' or ts['ftd_hash'] == 'REMOVED':
-                    risk_high.append(
-                        f"IKEv1 TS '{ts['name']}': "
-                        f"{ts['esp_enc']}/{esp_hash_str} — contains REMOVED alg"
-                    )
-                else:
-                    risk_medium.append(
-                        f"IKEv1 TS '{ts['name']}': "
-                        f"{ts['esp_enc']}/{esp_hash_str} — contains DEPRECATED alg"
-                    )
+                worst = 'REMOVED' if (
+                    ts['ftd_enc'] == 'REMOVED' or
+                    ts['ftd_hash'] == 'REMOVED'
+                ) else 'DEPRECATED'
+                entry = (
+                    f"IKEv1 TS '{ts['name']}': "
+                    f"{ts['esp_enc']}/{hash_str} — {worst}"
+                )
+                risk_high.append(entry) if worst == 'REMOVED' \
+                    else risk_medium.append(entry)
 
         if weak_ts:
             print()
-            print(f"  [FLAG] {len(weak_ts)} transform set(s) contain"
-                  f" REMOVED or DEPRECATED algorithms.")
+            print(f"  [FLAG] {len(weak_ts)} transform set(s) contain "
+                  "REMOVED or DEPRECATED algorithms.")
             print("  These MUST be updated before FTD migration AND")
             print("  coordinated with all remote VPN peers.")
 
@@ -1439,38 +1720,33 @@ def print_crypto(ikev1_policies, ikev2_policies,
         for prop in ikev2_proposals:
             print(f"\n     Proposal : {prop['name']}")
 
-            enc_list = prop['encryption'] or ['(none)']
-            int_list = prop['integrity']  or ['(none)']
+            for enc in prop['encryption'] or ['(none)']:
+                s = ftd_enc_status(enc)
+                print(f"       Encryption : {enc:<30} {risk_symbol(s)}")
+                if s in ('REMOVED', 'DEPRECATED'):
+                    entry = (
+                        f"IKEv2 Proposal '{prop['name']}' "
+                        f"enc '{enc}': {s}"
+                    )
+                    risk_high.append(entry) if s == 'REMOVED' \
+                        else risk_medium.append(entry)
 
-            for enc in enc_list:
-                s = FTD_STATUS_SYMBOL.get(ftd_enc_status(enc), 'UNKNOWN')
-                print(f"       Encryption : {enc:<25} {s}")
-                if 'REMOVED' in s:
-                    risk_high.append(
-                        f"IKEv2 Proposal '{prop['name']}' enc {enc}: REMOVED"
+            for alg in prop['integrity'] or ['(none)']:
+                s = ftd_int_status(alg)
+                print(f"       Integrity  : {alg:<30} {risk_symbol(s)}")
+                if s in ('REMOVED', 'DEPRECATED'):
+                    entry = (
+                        f"IKEv2 Proposal '{prop['name']}' "
+                        f"integrity '{alg}': {s}"
                     )
-                elif 'DEPRECATED' in s:
-                    risk_medium.append(
-                        f"IKEv2 Proposal '{prop['name']}' enc {enc}: DEPRECATED"
-                    )
-
-            for alg in int_list:
-                s = FTD_STATUS_SYMBOL.get(ftd_int_status(alg), 'UNKNOWN')
-                print(f"       Integrity  : {alg:<25} {s}")
-                if 'REMOVED' in s:
-                    risk_high.append(
-                        f"IKEv2 Proposal '{prop['name']}' integrity {alg}: REMOVED"
-                    )
-                elif 'DEPRECATED' in s:
-                    risk_medium.append(
-                        f"IKEv2 Proposal '{prop['name']}' integrity {alg}: DEPRECATED"
-                    )
+                    risk_high.append(entry) if s == 'REMOVED' \
+                        else risk_medium.append(entry)
 
             if prop['ah']:
                 print(f"       AH         : {', '.join(prop['ah'])}")
                 risk_info.append(
                     f"IKEv2 Proposal '{prop['name']}' uses AH — "
-                    "verify FTD AH support for this proposal"
+                    "verify FTD AH support"
                 )
 
     # ── IPsec Profiles ────────────────────────────────────────
@@ -1486,11 +1762,13 @@ def print_crypto(ikev1_policies, ikev2_policies,
                     if grp_m:
                         g = grp_m.group(1)
                         status = ftd_dh_status(g)
-                        pfs_flag = f"  [{FTD_STATUS_SYMBOL.get(status, '')} DH group{g}]"
                         if status != 'OK':
+                            pfs_flag = (
+                                f"  [{risk_symbol(status)} DH group{g}]"
+                            )
                             risk_medium.append(
-                                f"IPsec profile '{profile['name']}'"
-                                f" PFS group{g}: {status}"
+                                f"IPsec profile '{profile['name']}' "
+                                f"PFS group{g}: {status}"
                             )
                 print(f"       set {setting}{pfs_flag}")
 
@@ -1516,9 +1794,8 @@ def print_crypto(ikev1_policies, ikev2_policies,
         total_entries = sum(len(v) for v in crypto_maps.values())
         print(f"\n  ── STATIC CRYPTO MAPS"
               f" ({len(crypto_maps)} map(s), {total_entries} entr(ies))"
-              + "─" * 25)
+              + " " + "─" * 25)
 
-        # Build weak TS lookup from ikev1_ts list
         weak_ts_names = {
             ts['name'] for ts in ikev1_ts
             if ts['ftd_enc'] in ('REMOVED', 'DEPRECATED') or
@@ -1528,22 +1805,21 @@ def print_crypto(ikev1_policies, ikev2_policies,
         for map_name, seqs in sorted(crypto_maps.items()):
             iface = map_interfaces.get(map_name, '(not bound)')
             print(f"\n     Crypto Map : {map_name}  (interface: {iface})")
-            print(f"     {'SEQ':>5}  {'MATCH ACL':<25} {'PEER(S)':<20}"
-                  f" {'IKEv1 TS':<20} {'IKEv2 PROP':<20} {'PFS'}")
-            print(f"     {'-'*5}  {'-'*24} {'-'*19} {'-'*19}"
-                  f" {'-'*19} {'-'*10}")
+            print(f"     {'SEQ':>5}  {'MATCH ACL':<22} {'PEER(S)':<20}"
+                  f" {'IKEv1 TS':<18} {'IKEv2 PROP':<18} {'PFS'}")
+            print(f"     {'-'*5}  {'-'*21} {'-'*19} {'-'*17}"
+                  f" {'-'*17} {'-'*10}")
 
             for seq, entry in sorted(seqs.items()):
-                acl   = entry['match_acl'] or '—'
+                acl   = entry['match_acl']        or '—'
                 peers = ', '.join(entry['peers'])  or '—'
-                ts    = ', '.join(entry['ikev1_ts'])   or '—'
-                prop  = ', '.join(entry['ikev2_prop']) or '—'
-                pfs   = entry['pfs'] or '—'
+                ts    = ', '.join(entry['ikev1_ts'])    or '—'
+                prop  = ', '.join(entry['ikev2_prop'])  or '—'
+                pfs   = entry['pfs']              or '—'
 
-                print(f"     {seq:>5}  {acl:<25} {peers:<20}"
-                      f" {ts:<20} {prop:<20} {pfs}")
+                print(f"     {seq:>5}  {acl:<22} {peers:<20}"
+                      f" {ts:<18} {prop:<18} {pfs}")
 
-                # Flag weak transform sets referenced in map
                 weak_refs = [
                     t for t in entry['ikev1_ts']
                     if t.lower() in {n.lower() for n in weak_ts_names}
@@ -1552,24 +1828,23 @@ def print_crypto(ikev1_policies, ikev2_policies,
                     print(f"             [FLAG] Weak TS referenced:"
                           f" {', '.join(weak_refs)}")
                     risk_high.append(
-                        f"Crypto map '{map_name}' seq {seq} references"
-                        f" weak TS: {', '.join(weak_refs)}"
+                        f"Crypto map '{map_name}' seq {seq} references "
+                        f"weak TS: {', '.join(weak_refs)}"
                     )
 
-                # PFS group check
                 if entry['pfs']:
-                    grp_m = re.search(r'group\s*(\d+)',
-                                      entry['pfs'].lower())
+                    grp_m = re.search(
+                        r'group\s*(\d+)', entry['pfs'].lower()
+                    )
                     if grp_m:
                         g = grp_m.group(1)
                         status = ftd_dh_status(g)
                         if status != 'OK':
-                            print(f"             [FLAG] PFS {entry['pfs']}"
-                                  f" — DH group{g}:"
-                                  f" {FTD_STATUS_SYMBOL.get(status, '')}")
+                            print(f"             [FLAG] PFS DH group{g}:"
+                                  f" {risk_symbol(status)}")
                             risk_medium.append(
-                                f"Crypto map '{map_name}' seq {seq}"
-                                f" PFS group{g}: {status}"
+                                f"Crypto map '{map_name}' seq {seq} "
+                                f"PFS group{g}: {status}"
                             )
 
     # ── Legacy ISAKMP ─────────────────────────────────────────
@@ -1577,9 +1852,8 @@ def print_crypto(ikev1_policies, ikev2_policies,
         print(f"\n  ── LEGACY ISAKMP STATEMENTS ({len(isakmp_globals)}) "
               + "─" * 37)
         print("     [INFO] 'crypto isakmp' is the legacy IKEv1 syntax.")
-        print("     Verify these settings are captured in IKEv1 policy")
-        print("     blocks above. If standalone, they may need manual")
-        print("     review for FMC migration.")
+        print("     Verify these are captured in IKEv1 policy blocks above.")
+        print("     If standalone, they may need manual review for FMC.")
         for line in isakmp_globals:
             print(f"     {line}")
 
@@ -1592,7 +1866,7 @@ def print_crypto(ikev1_policies, ikev2_policies,
     # ── Partial lines ─────────────────────────────────────────
     if partials:
         print(f"\n  ── PARTIAL MATCHES ({len(partials)}) " + "─" * 50)
-        print("  [PARTIAL] These lines start with 'crypto' but did not")
+        print("  [PARTIAL] Lines starting with 'crypto' that did not")
         print("  match any known pattern. Review manually:")
         for p in partials:
             print(f"    {p[:75]}")
@@ -1612,24 +1886,24 @@ def print_crypto(ikev1_policies, ikev2_policies,
     print(f"  {'='*78}")
 
     if not risk_high and not risk_medium and not risk_info:
-        print("  ✅ No crypto migration risks detected.")
+        print("  [OK] No crypto migration risks detected.")
     else:
         if risk_high:
-            print(f"\n  ❌ HIGH RISK ({len(risk_high)} item(s))"
-                  f" — will BREAK on FTD without remediation:")
+            print(f"\n  [HIGH RISK] ({len(risk_high)} item(s))"
+                  f" — WILL BREAK on FTD without remediation:")
             for item in risk_high:
-                print(f"     • {item}")
+                print(f"     * {item}")
 
         if risk_medium:
-            print(f"\n  ⚠️  MEDIUM RISK ({len(risk_medium)} item(s))"
+            print(f"\n  [MEDIUM RISK] ({len(risk_medium)} item(s))"
                   f" — deprecated, may fail on newer FTD versions:")
             for item in risk_medium:
-                print(f"     • {item}")
+                print(f"     * {item}")
 
         if risk_info:
-            print(f"\n  ℹ️  INFO ({len(risk_info)} item(s)) — verify:")
+            print(f"\n  [INFO] ({len(risk_info)} item(s)) — verify:")
             for item in risk_info:
-                print(f"     • {item}")
+                print(f"     * {item}")
 
     print()
 
@@ -1644,6 +1918,9 @@ def print_header():
     print("  ASA MIGRATION PARSER — PHASE 4")
     print("  Full-Spec ACL + Crypto Analysis with FTD Compatibility")
     print("  Three-layer parsing: Full match | Partial | Unmatched")
+    print("  Includes: PKI trustpoints, certificate chains,")
+    print("            IKEv1/IKEv2 policies, transform sets,")
+    print("            IPsec proposals, crypto maps, dynamic maps")
     print("=" * 78)
     print()
 
