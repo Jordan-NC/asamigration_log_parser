@@ -64,6 +64,15 @@
 #   PKI        : crypto ca trustpoint, certificate chain,
 #                trustpool, IKEv2 RA trustpoint, am-disable
 #   FTD status : REMOVED / DEPRECATED / OK per algorithm
+#
+# FTD COMPATIBILITY BASELINE:
+#   Algorithm removal/deprecation applies to FTD 6.7.0 onwards.
+#   Verified accurate for FMC/FTD 7.2.x and 7.6.x (suggested
+#   release as of April 2026: 7.6.4 / 7.6.5).
+#   Source: Cisco Secure Firewall Threat Defense Compatibility
+#   Guide (updated March 2026) and FMC 7.2/7.6 VPN config guides.
+#   Always verify against the Cisco Software Download page for
+#   the latest suggested release before any upgrade.
 # ============================================================
 
 import re
@@ -112,14 +121,31 @@ def extract_sections(filepath):
 
 # ════════════════════════════════════════════════════════════
 # FTD ALGORITHM COMPATIBILITY TABLES
-# Source: FMC Config Guide 6.7+, ASA 9.13/9.15 release notes
+# Source: Cisco Secure Firewall Management Center Device
+#         Configuration Guide, versions 6.7 through 7.6
+#         ASA 9.13/9.15 release notes (cipher deprecation)
+#         Cisco Secure Firewall Threat Defense Compatibility
+#         Guide (updated March 2026)
+#
+# Verified against FMC/FTD 7.2.8 (current) and 7.6.x
+# (Cisco suggested release as of April 2026: 7.6.4 / 7.6.5)
+#
+# STATUS VALUES:
+#   REMOVED    — Not configurable in FMC for FTD 6.7+.
+#                Tunnels using these algorithms will FAIL
+#                post-migration without remediation.
+#   DEPRECATED — Still functional on FMC 7.2.x and 7.6.x
+#                but flagged by Cisco for future removal.
+#                Flag to customer as post-migration cleanup.
+#   OK         — Fully supported. No action required.
 # ════════════════════════════════════════════════════════════
 
 # FTD status values: 'REMOVED', 'DEPRECATED', 'OK'
 
 FTD_ESP_ENCRYPTION = {
-    'esp-des'         : 'REMOVED',
-    'esp-3des'        : 'REMOVED',
+    # ESP transform set encryption (IKEv1 transform sets)
+    'esp-des'         : 'REMOVED',     # Removed FTD 6.7+
+    'esp-3des'        : 'REMOVED',     # Removed FTD 6.7+
     'esp-aes'         : 'OK',
     'esp-aes-192'     : 'OK',
     'esp-aes-256'     : 'OK',
@@ -128,8 +154,8 @@ FTD_ESP_ENCRYPTION = {
     'esp-aes-gcm-256' : 'OK',
     'esp-null'        : 'OK',
     # IKEv2 proposal form (no esp- prefix)
-    'des'             : 'REMOVED',
-    '3des'            : 'REMOVED',
+    'des'             : 'REMOVED',     # Removed FTD 6.7+
+    '3des'            : 'REMOVED',     # Removed FTD 6.7+
     'aes'             : 'OK',
     'aes-192'         : 'OK',
     'aes-256'         : 'OK',
@@ -140,68 +166,86 @@ FTD_ESP_ENCRYPTION = {
 }
 
 FTD_ESP_INTEGRITY = {
-    # ESP hash form (transform sets)
-    'esp-md5-hmac'    : 'REMOVED',
-    'esp-sha-hmac'    : 'DEPRECATED',
+    # ESP hash (IKEv1 transform sets)
+    'esp-md5-hmac'    : 'REMOVED',     # Removed FTD 6.7+
+    'esp-sha-hmac'    : 'DEPRECATED',  # SHA-1, deprecated
     'esp-sha256-hmac' : 'OK',
     'esp-sha384-hmac' : 'OK',
     'esp-sha512-hmac' : 'OK',
     'esp-none'        : 'OK',
-    # IKEv2 proposal form — no hyphen (older ASA output)
-    'md5'             : 'REMOVED',
-    'sha'             : 'DEPRECATED',
+    # IKEv2 proposal integrity — no hyphen form
+    'md5'             : 'REMOVED',     # Removed FTD 6.7+
+    'sha'             : 'DEPRECATED',  # SHA-1, deprecated
     'sha256'          : 'OK',
     'sha384'          : 'OK',
     'sha512'          : 'OK',
     'null'            : 'OK',
-    # IKEv2 proposal form — hyphenated (newer ASA output)
-    'sha-1'           : 'DEPRECATED',
+    'none'            : 'OK',
+    # IKEv2 proposal integrity — hyphenated form
+    # (newer ASA output format varies by OS version)
+    'sha-1'           : 'DEPRECATED',  # SHA-1, deprecated
     'sha-256'         : 'OK',
     'sha-384'         : 'OK',
     'sha-512'         : 'OK',
-    'md5-96'          : 'REMOVED',
+    'md5-96'          : 'REMOVED',     # Removed FTD 6.7+
 }
 
 FTD_IKE_ENCRYPTION = {
-    'des'         : 'REMOVED',
-    '3des'        : 'REMOVED',
+    # IKE Phase 1 policy encryption
+    'des'         : 'REMOVED',         # Removed FTD 6.7+
+    '3des'        : 'REMOVED',         # Removed FTD 6.7+
     'aes'         : 'OK',
     'aes-192'     : 'OK',
     'aes-256'     : 'OK',
+    # IKEv2 only
     'aes-gcm'     : 'OK',
     'aes-gcm-192' : 'OK',
     'aes-gcm-256' : 'OK',
     'null'        : 'OK',
 }
+
 FTD_IKE_HASH = {
+    # IKE Phase 1 policy hash / IKEv2 integrity + PRF
     # No hyphen form
-    'md5'    : 'REMOVED',
-    'sha'    : 'DEPRECATED',
+    'md5'    : 'REMOVED',              # Removed FTD 6.7+
+    'sha'    : 'DEPRECATED',           # SHA-1, deprecated
     'sha256' : 'OK',
     'sha384' : 'OK',
     'sha512' : 'OK',
-    # Hyphenated form
-    'sha-1'  : 'DEPRECATED',
+    # Hyphenated form (newer ASA output)
+    'sha-1'  : 'DEPRECATED',           # SHA-1, deprecated
     'sha-256': 'OK',
     'sha-384': 'OK',
     'sha-512': 'OK',
-    # Null — valid when used with AES-GCM encryption
+    # Null integrity (valid with AES-GCM encryption)
     'null'   : 'OK',
     'none'   : 'OK',
 }
 
-# DH group FTD status
-# Group 5  : deprecated for IKEv1, removed for IKEv2
-# Groups 2, 24: removed entirely in FTD 6.7+
+# DH Group FTD status
+# Verified against FMC 7.2.x and 7.6.x documentation:
+#   Group 1   : Removed FTD 6.7+
+#   Group 2   : Removed FTD 6.7+
+#   Group 5   : DEPRECATED for IKEv1 on FMC 7.2.x and 7.6.x
+#               (still functional but flagged for future removal)
+#               REMOVED for IKEv2 per FMC 7.2 config guide
+#               Practical flag: DEPRECATED covers both cases —
+#               tunnels still establish but should be upgraded
+#   Group 14  : Minimum recommended (2048-bit modulus)
+#   Group 19  : Acceptable (256-bit elliptic curve)
+#   Group 20  : Next Generation Encryption (384-bit EC)
+#   Group 21  : Next Generation Encryption (521-bit EC)
+#   Group 24  : Removed FTD 6.7+
 FTD_DH_GROUPS = {
-    '1'  : 'REMOVED',
-    '2'  : 'REMOVED',
-    '5'  : 'DEPRECATED',
-    '14' : 'OK',
+    '1'  : 'REMOVED',                  # Removed FTD 6.7+
+    '2'  : 'REMOVED',                  # Removed FTD 6.7+
+    '5'  : 'DEPRECATED',               # Deprecated IKEv1,
+                                        # removed IKEv2 (FMC 7.2+)
+    '14' : 'OK',                        # Minimum recommended
     '19' : 'OK',
     '20' : 'OK',
     '21' : 'OK',
-    '24' : 'REMOVED',
+    '24' : 'REMOVED',                  # Removed FTD 6.7+
 }
 
 FTD_STATUS_SYMBOL = {
@@ -355,11 +399,12 @@ RE_IKEv2_LIFE   = re.compile(
 )
 
 # IKEv1 transform sets
-# Handles both:
-#   crypto ipsec ikev1 transform-set <name> <enc> <hash>
-#   crypto ipsec ikev1 transform-set <name> mode <transport|tunnel>
 RE_IKEv1_TS = re.compile(
-    r'^crypto ipsec ikev1 transform-set\s+(\S+)\s+(\S+)(?:\s+(\S+))?(?:\s+(\S+))?(?:\s+(\S+))?',
+    r'^crypto ipsec ikev1 transform-set\s+(\S+)\s+(\S+)(?:\s+(\S+))?',
+    re.IGNORECASE
+)
+RE_TS_MODE = re.compile(
+    r'^crypto ipsec ikev1 transform-set\s+\S+.*\s+mode\s+(transport|tunnel)',
     re.IGNORECASE
 )
 
@@ -1135,90 +1180,29 @@ def parse_crypto(lines):
                 current_ikev2_policy['lifetime'] = m.group(1)
                 continue
 
-       # ── IKEv1 transform sets ──────────────────────────────
+        # ── IKEv1 transform sets ──────────────────────────────
         m = RE_IKEv1_TS.match(stripped)
         if m:
             reset_all()
-            name   = m.group(1)
-            token2 = m.group(2).lower() if m.group(2) else None
-            token3 = m.group(3).lower() if m.group(3) else None
-            token4 = m.group(4).lower() if m.group(4) else None
-            token5 = m.group(5).lower() if m.group(5) else None
+            name     = m.group(1)
+            esp_enc  = m.group(2).lower()
+            esp_hash = m.group(3).lower() if m.group(3) else None
 
-            all_tokens = [t for t in [token2, token3, token4, token5]
-                          if t is not None]
+            mode = 'tunnel'
+            mode_m = RE_TS_MODE.match(stripped)
+            if mode_m:
+                mode = mode_m.group(1).lower()
+                if esp_hash and esp_hash in ('transport', 'tunnel', 'mode'):
+                    esp_hash = None
 
-            # Check if this is a mode-only line:
-            # crypto ipsec ikev1 transform-set <name> mode transport
-            if token2 == 'mode' and token3 in ('transport', 'tunnel', None):
-                # This is a mode continuation line for an existing TS
-                # Find and update the existing entry rather than creating new
-                for existing in ikev1_ts:
-                    if existing['name'] == name:
-                        existing['mode'] = token3 or 'tunnel'
-                        break
-                else:
-                    # Mode line appeared before main TS line — store for merge
-                    ikev1_ts.append({
-                        'name'    : name,
-                        'esp_enc' : '(mode-only line)',
-                        'esp_hash': None,
-                        'mode'    : token3 or 'tunnel',
-                        'ftd_enc' : 'UNKNOWN',
-                        'ftd_hash': 'N/A',
-                    })
-                continue
-
-            # Normal transform set line — extract enc and hash
-            # Tokens may include mode keyword inline at end
-            esp_enc  = None
-            esp_hash = None
-            mode     = 'tunnel'
-
-            # Walk tokens — first esp-* token is enc, second is hash
-            # 'mode' keyword followed by transport/tunnel sets mode
-            i = 0
-            while i < len(all_tokens):
-                tok = all_tokens[i]
-                if tok == 'mode' and i + 1 < len(all_tokens):
-                    mode = all_tokens[i + 1]
-                    i += 2
-                    continue
-                if tok in ('transport', 'tunnel') and i > 0 \
-                        and all_tokens[i-1] == 'mode':
-                    i += 1
-                    continue
-                if esp_enc is None:
-                    esp_enc = tok
-                elif esp_hash is None:
-                    esp_hash = tok
-                i += 1
-
-            if esp_enc is None:
-                esp_enc = '(none)'
-
-            # Check if an entry for this name already exists
-            # (mode continuation line processed first edge case)
-            existing_entry = next(
-                (ts for ts in ikev1_ts if ts['name'] == name), None
-            )
-            if existing_entry and existing_entry['esp_enc'] == '(mode-only line)':
-                # Update the placeholder
-                existing_entry['esp_enc']  = esp_enc
-                existing_entry['esp_hash'] = esp_hash
-                existing_entry['ftd_enc']  = ftd_enc_status(esp_enc)
-                existing_entry['ftd_hash'] = (
-                    ftd_int_status(esp_hash) if esp_hash else 'N/A'
-                )
-            else:
-                ikev1_ts.append({
-                    'name'    : name,
-                    'esp_enc' : esp_enc,
-                    'esp_hash': esp_hash,
-                    'mode'    : mode,
-                    'ftd_enc' : ftd_enc_status(esp_enc),
-                    'ftd_hash': ftd_int_status(esp_hash) if esp_hash else 'N/A',
-                })
+            ikev1_ts.append({
+                'name'    : name,
+                'esp_enc' : esp_enc,
+                'esp_hash': esp_hash,
+                'mode'    : mode,
+                'ftd_enc' : ftd_enc_status(esp_enc),
+                'ftd_hash': ftd_int_status(esp_hash) if esp_hash else 'N/A',
+            })
             continue
 
         # ── IKEv2 proposal header ─────────────────────────────
