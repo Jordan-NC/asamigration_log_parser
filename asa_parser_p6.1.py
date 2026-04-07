@@ -136,15 +136,21 @@ def run_all_parsers(sections_data, p3, p4, p5):
     """
     results = {}
 
-    # ── Phase 3 ───────────────────────────────────────────────
+    # ── Phase 3: Interface ────────────────────────────────────
     intf_lines = sections_data.get("INTERFACE-IP-BRIEF", [])
     results['interfaces'] = p3.parse_interface_brief(intf_lines) \
         if intf_lines else []
 
+    verbose_lines = sections_data.get("INTERFACE", [])
+    results['interfaces_verbose'] = p3.parse_interface_verbose(verbose_lines) \
+        if verbose_lines else []
+
+    # ── Phase 3: Route ────────────────────────────────────────
     route_lines = sections_data.get("ROUTE", [])
     results['routes'] = p3.parse_route_table(route_lines) \
         if route_lines else []
 
+    # ── Phase 3: VPN Session Summary ──────────────────────────
     vpn_lines = sections_data.get("VPN-SESSIONDB-SUMMARY", [])
     if vpn_lines:
         sessions, session_types = p3.parse_vpn_summary(vpn_lines)
@@ -154,7 +160,70 @@ def run_all_parsers(sections_data, p3, p4, p5):
         results['vpn_sessions']      = []
         results['vpn_session_types'] = []
 
-    # ── Phase 4 ───────────────────────────────────────────────
+    # ── Phase 3: VPN AnyConnect ───────────────────────────────
+    ac_lines = sections_data.get("VPN-SESSIONDB-ANYCONNECT", [])
+    results['vpn_anyconnect'] = p3.parse_vpn_anyconnect(ac_lines) \
+        if ac_lines else []
+
+    # ── Phase 3: VPN L2L ──────────────────────────────────────
+    l2l_lines = sections_data.get("VPN-SESSIONDB-L2L", [])
+    results['vpn_l2l'] = p3.parse_vpn_l2l(l2l_lines) \
+        if l2l_lines else []
+
+    # ── Phase 3: VPN Ratio ────────────────────────────────────
+    enc_lines = sections_data.get("VPN-SESSIONDB-RATIO-ENC", [])
+    if enc_lines:
+        results['vpn_ratio_enc'], results['vpn_ratio_enc_totals'] = \
+            p3.parse_vpn_ratio(enc_lines)
+    else:
+        results['vpn_ratio_enc']        = []
+        results['vpn_ratio_enc_totals'] = {}
+
+    proto_lines = sections_data.get("VPN-SESSIONDB-RATIO-PROTO", [])
+    if proto_lines:
+        results['vpn_ratio_proto'], results['vpn_ratio_proto_totals'] = \
+            p3.parse_vpn_ratio(proto_lines)
+    else:
+        results['vpn_ratio_proto']        = []
+        results['vpn_ratio_proto_totals'] = {}
+
+    # ── Phase 3: VPN Full/Detail (same parser) ────────────────
+    full_lines   = sections_data.get("VPN-SESSIONDB-FULL", [])
+    detail_lines = sections_data.get("VPN-SESSIONDB-DETAIL", [])
+    combined_full = full_lines or detail_lines
+    if combined_full:
+        results['vpn_full_l2l'], results['vpn_full_ac_count'] = \
+            p3.parse_vpn_full(combined_full)
+    else:
+        results['vpn_full_l2l']      = []
+        results['vpn_full_ac_count'] = 0
+
+    # ── Phase 3: IKEv1 / ISAKMP SA ───────────────────────────
+    ikev1_lines  = sections_data.get("CRYPTO-IKEv1-SA", [])
+    isakmp_lines = sections_data.get("CRYPTO-ISAKMP-SA", [])
+    ikev1_src    = ikev1_lines or isakmp_lines
+    results['ikev1_sas'] = p3.parse_isakmp_sa(ikev1_src) \
+        if ikev1_src else []
+
+    # ── Phase 3: IKEv2 SA ─────────────────────────────────────
+    ikev2_sa_lines = sections_data.get("CRYPTO-IKEv2-SA", [])
+    results['ikev2_sas'] = p3.parse_ikev2_sa(ikev2_sa_lines) \
+        if ikev2_sa_lines else []
+
+    # ── Phase 3: IPsec SA ─────────────────────────────────────
+    ipsec_sa_lines = sections_data.get("CRYPTO-IPSEC-SA", [])
+    results['ipsec_sas'] = p3.parse_ipsec_sa(ipsec_sa_lines) \
+        if ipsec_sa_lines else []
+
+    # ── Phase 3: Crypto Stats ─────────────────────────────────
+    ipsec_stats_lines  = sections_data.get("CRYPTO-IPSEC-STATS", [])
+    isakmp_stats_lines = sections_data.get("CRYPTO-ISAKMP-STATS", [])
+    results['ipsec_stats']  = p3.parse_crypto_stats(
+        ipsec_stats_lines, 'IPsec') if ipsec_stats_lines else {}
+    results['isakmp_stats'] = p3.parse_crypto_stats(
+        isakmp_stats_lines, 'ISAKMP') if isakmp_stats_lines else {}
+
+    # ── Phase 4: ACL ──────────────────────────────────────────
     acl_lines = sections_data.get("ACCESS-LIST", [])
     if acl_lines:
         acl_meta, acl_rules, acl_partials, acl_unmatched = \
@@ -181,6 +250,7 @@ def run_all_parsers(sections_data, p3, p4, p5):
         results['cfg_acl_partials']  = []
         results['cfg_acl_unmatched'] = []
 
+    # ── Phase 4: Crypto Config ────────────────────────────────
     crypto_lines = sections_data.get("RUNNING-CONFIG-CRYPTO", [])
     if crypto_lines:
         crypto_results = p4.parse_crypto(crypto_lines)
@@ -220,7 +290,7 @@ def run_all_parsers(sections_data, p3, p4, p5):
         results['pki_ra_trustpoint'] = None
         results['ikev1_am_disable']  = False
 
-    # ── Phase 5 ───────────────────────────────────────────────
+    # ── Phase 5: NAT ──────────────────────────────────────────
     nat_lines  = sections_data.get("RUNNING-CONFIG-ALL", [])
     nat_source = "RUNNING-CONFIG-ALL"
     if not nat_lines:
@@ -526,11 +596,24 @@ def _build_exec_findings(results, version_info):
     ts_count  = len(results['ikev1_ts'])
     map_count = sum(len(v) for v in results['crypto_maps'].values())
 
+    # Live SA data
+    l2l_live        = results.get('vpn_l2l', []) or \
+                      results.get('vpn_full_l2l', [])
+    removed_live    = [t for t in l2l_live
+                       if t.get('alg_status') == 'REMOVED']
+    deprecated_live = [t for t in l2l_live
+                       if t.get('alg_status') == 'DEPRECATED']
+
     lines.append("  VPN CONNECTIVITY")
     lines.append(
         "  At the time of analysis, " + str(total_active) +
         " active VPN session(s) were present."
     )
+    if l2l_live:
+        lines.append(
+            "  " + str(len(l2l_live)) +
+            " site-to-site tunnel(s) were active at log capture time."
+        )
     if has_anyconnect:
         lines.append(
             "  Remote access VPN (employee VPN / AnyConnect) is in use."
@@ -545,6 +628,21 @@ def _build_exec_findings(results, version_info):
         " VPN encryption profile(s) and " + str(map_count) +
         " VPN tunnel configuration(s)."
     )
+    if removed_live:
+        lines.append(
+            "  " + str(len(removed_live)) +
+            " active tunnel(s) are currently negotiating with "
+            "encryption algorithms that are not supported on the new "
+            "platform. These tunnels will fail after migration without "
+            "configuration changes on both sides."
+        )
+    if deprecated_live:
+        lines.append(
+            "  " + str(len(deprecated_live)) +
+            " active tunnel(s) use encryption algorithms that are "
+            "flagged for removal in future versions. These tunnels "
+            "will function after migration but should be updated."
+        )
     lines.append("")
 
     # NAT
@@ -1184,6 +1282,456 @@ def _build_technical_checklist(results):
 # TECHNICAL REPORT BUILDER
 # ════════════════════════════════════════════════════════════
 
+def _build_fmc_action_items(results):
+    """
+    Builds Section 6b: explicit per-tunnel FMC action items.
+    Correlates crypto map → peer → transform set/proposal → algorithm
+    issues → specific FMC object and navigation path.
+
+    This is the primary engineer working list for what must be
+    changed in FMC before deployment will complete successfully.
+
+    Uses both config data (from p4) and live SA data (from p3)
+    to show current negotiated state alongside required changes.
+    """
+    lines = []
+
+    lines.append("=" * 78)
+    lines.append("  SECTION 6b: FMC ACTION ITEMS — CRYPTO DEPLOYMENT BLOCKERS")
+    lines.append("=" * 78)
+    lines.append("")
+    lines.append("  This section lists every change required in FMC for the")
+    lines.append("  VPN deployment to complete successfully. Items marked")
+    lines.append("  [REMOVED] will cause deployment failures. Items marked")
+    lines.append("  [DEPRECATED] will deploy but should be corrected.")
+    lines.append("")
+    lines.append("  Actions are ordered: Phase 1 policies first (global impact),")
+    lines.append("  then per-tunnel Phase 2 (transform sets / proposals).")
+    lines.append("")
+
+    # ── Build live SA lookup: peer IP → negotiated algorithms ──
+    # Prefer full/detail data, fall back to l2l, then ipsec sa
+    live_sa_by_peer = {}
+
+    for t in results.get('vpn_full_l2l', []):
+        peer = t.get('ip') or t.get('connection', '')
+        if peer:
+            live_sa_by_peer[peer] = {
+                'enc_raw'   : t.get('encryption_raw', ''),
+                'hash_raw'  : t.get('hashing_raw', ''),
+                'alg_status': t.get('alg_status', 'UNKNOWN'),
+                'source'    : 'vpn-sessiondb full',
+            }
+
+    for t in results.get('vpn_l2l', []):
+        peer = t.get('ip') or t.get('connection', '')
+        if peer and peer not in live_sa_by_peer:
+            live_sa_by_peer[peer] = {
+                'enc_raw'   : t.get('encryption_raw', ''),
+                'hash_raw'  : t.get('hashing_raw', ''),
+                'alg_status': t.get('alg_status', 'UNKNOWN'),
+                'source'    : 'vpn-sessiondb l2l',
+            }
+
+    for sa in results.get('ipsec_sas', []):
+        peer = sa.get('peer', '')
+        if peer and peer not in live_sa_by_peer:
+            live_sa_by_peer[peer] = {
+                'transform_set': sa.get('transform_set', ''),
+                'alg_status'   : sa.get('alg_status', 'UNKNOWN'),
+                'source'       : 'show crypto ipsec sa',
+            }
+
+    # ── Build TS analysis ──────────────────────────────────────
+    # Map transform set name → analysis
+    REMOVED_ENC = {
+        'esp-des': 'esp-aes-256', 'esp-3des': 'esp-aes-256',
+    }
+    REMOVED_INT = {
+        'esp-md5-hmac': 'esp-sha256-hmac',
+    }
+    DEPRECATED_INT = {
+        'esp-sha-hmac': 'esp-sha256-hmac',
+    }
+    REMOVED_IKE_ENC  = {'des': 'aes-256', '3des': 'aes-256'}
+    REMOVED_IKE_HASH = {'md5': 'sha256', 'md5-96': 'sha256'}
+    DEPRECATED_IKE_HASH = {'sha': 'sha256', 'sha-1': 'sha256'}
+    REMOVED_DH   = {'1': 'group 14', '2': 'group 14', '24': 'group 14'}
+    DEPRECATED_DH = {'5': 'group 14'}
+
+    ts_issues = {}
+    for ts in results.get('ikev1_ts', []):
+        name     = ts['name']
+        enc      = ts['esp_enc']
+        hsh      = ts.get('esp_hash') or ''
+        enc_st   = ts['ftd_enc']
+        hash_st  = ts['ftd_hash'] if ts['ftd_hash'] != 'N/A' else 'OK'
+        problems = []
+        if enc_st in ('REMOVED', 'DEPRECATED'):
+            repl = REMOVED_ENC.get(enc, 'esp-aes-256')
+            problems.append({
+                'field': 'encryption', 'current': enc,
+                'status': enc_st, 'replacement': repl,
+            })
+        if hash_st in ('REMOVED', 'DEPRECATED') and hsh:
+            repl = REMOVED_INT.get(hsh,
+                   DEPRECATED_INT.get(hsh, 'esp-sha256-hmac'))
+            problems.append({
+                'field': 'integrity', 'current': hsh,
+                'status': hash_st, 'replacement': repl,
+            })
+        if problems:
+            worst = 'REMOVED' if any(
+                p['status'] == 'REMOVED' for p in problems
+            ) else 'DEPRECATED'
+            ts_issues[name] = {'problems': problems, 'severity': worst}
+
+    prop_issues = {}
+    for prop in results.get('ikev2_proposals', []):
+        name     = prop['name']
+        problems = []
+        for alg in prop.get('encryption', []):
+            if alg in REMOVED_ENC:
+                problems.append({
+                    'field': 'encryption', 'current': alg,
+                    'status': 'REMOVED', 'replacement': REMOVED_ENC[alg],
+                })
+        for alg in prop.get('integrity', []):
+            if alg in REMOVED_IKE_HASH:
+                problems.append({
+                    'field': 'integrity', 'current': alg,
+                    'status': 'REMOVED',
+                    'replacement': REMOVED_IKE_HASH[alg],
+                })
+            elif alg in DEPRECATED_IKE_HASH:
+                problems.append({
+                    'field': 'integrity', 'current': alg,
+                    'status': 'DEPRECATED',
+                    'replacement': DEPRECATED_IKE_HASH[alg],
+                })
+        if problems:
+            worst = 'REMOVED' if any(
+                p['status'] == 'REMOVED' for p in problems
+            ) else 'DEPRECATED'
+            prop_issues[name] = {'problems': problems, 'severity': worst}
+
+    # ── STEP A: IKEv1 Phase 1 Policy Actions ──────────────────
+    ikev1_pol_actions = []
+    for pol in results.get('ikev1_policies', []):
+        enc  = pol.get('encryption') or ''
+        hsh  = pol.get('hash')       or ''
+        grp  = pol.get('group')      or ''
+        changes = []
+
+        if enc in REMOVED_IKE_ENC:
+            changes.append(f"  encryption: change '{enc}' → "
+                           f"'{REMOVED_IKE_ENC[enc]}'  [REMOVED]")
+        if hsh in REMOVED_IKE_HASH:
+            changes.append(f"  hash: change '{hsh}' → "
+                           f"'{REMOVED_IKE_HASH[hsh]}'  [REMOVED]")
+        elif hsh in DEPRECATED_IKE_HASH:
+            changes.append(f"  hash: change '{hsh}' → "
+                           f"'{DEPRECATED_IKE_HASH[hsh]}'  [DEPRECATED]")
+        if grp in REMOVED_DH:
+            changes.append(f"  group: change group {grp} → "
+                           f"{REMOVED_DH[grp]}  [REMOVED]")
+        elif grp in DEPRECATED_DH:
+            changes.append(f"  group: change group {grp} → "
+                           f"{DEPRECATED_DH[grp]}  [DEPRECATED]")
+
+        if changes:
+            ikev1_pol_actions.append((pol['priority'], changes))
+
+    if ikev1_pol_actions:
+        lines.append("  ── A. IKEv1 PHASE 1 POLICY CHANGES " + "─" * 42)
+        lines.append("  Location: FMC → Objects → Object Management →")
+        lines.append("            VPN → IKEv1 Policy")
+        lines.append("  Impact  : Global — affects ALL IKEv1 tunnels")
+        lines.append("")
+        for priority, changes in sorted(ikev1_pol_actions):
+            lines.append(f"  IKEv1 Policy (priority {priority}):")
+            for ch in changes:
+                lines.append(f"    {ch}")
+        lines.append("")
+
+    # ── STEP B: IKEv2 Phase 1 Policy Actions ──────────────────
+    ikev2_pol_actions = []
+    for pol in results.get('ikev2_policies', []):
+        changes = []
+        for alg in pol.get('encryption', []):
+            if alg in REMOVED_IKE_ENC:
+                changes.append(f"  encryption: change '{alg}' → "
+                               f"'{REMOVED_IKE_ENC[alg]}'  [REMOVED]")
+        for alg in pol.get('integrity', []) + pol.get('prf', []):
+            if alg in REMOVED_IKE_HASH:
+                changes.append(f"  integrity/prf: change '{alg}' → "
+                               f"'{REMOVED_IKE_HASH[alg]}'  [REMOVED]")
+            elif alg in DEPRECATED_IKE_HASH:
+                changes.append(f"  integrity/prf: change '{alg}' → "
+                               f"'{DEPRECATED_IKE_HASH[alg]}'  [DEPRECATED]")
+        for grp in pol.get('group', []):
+            g = re.sub(r'group\s*', '', grp.lower()).strip()
+            if g in REMOVED_DH:
+                changes.append(f"  group: change group {g} → "
+                               f"{REMOVED_DH[g]}  [REMOVED]")
+            elif g in DEPRECATED_DH:
+                changes.append(f"  group: change group {g} → "
+                               f"{DEPRECATED_DH[g]}  [DEPRECATED]")
+        if changes:
+            ikev2_pol_actions.append((pol['priority'], changes))
+
+    if ikev2_pol_actions:
+        lines.append("  ── B. IKEv2 PHASE 1 POLICY CHANGES " + "─" * 42)
+        lines.append("  Location: FMC → Objects → Object Management →")
+        lines.append("            VPN → IKEv2 Policy")
+        lines.append("  Impact  : Global — affects ALL IKEv2 tunnels")
+        lines.append("")
+        for priority, changes in sorted(ikev2_pol_actions):
+            lines.append(f"  IKEv2 Policy (priority {priority}):")
+            for ch in changes:
+                lines.append(f"    {ch}")
+        lines.append("")
+
+    # ── STEP C: Per-Tunnel S2S VPN Actions ────────────────────
+    crypto_maps  = results.get('crypto_maps', {})
+    map_ifaces   = results.get('map_interfaces', {})
+
+    tunnel_actions = []
+
+    for map_name, seqs in sorted(crypto_maps.items()):
+        iface = map_ifaces.get(map_name, '(not bound)')
+        for seq, entry in sorted(seqs.items()):
+            peers     = entry.get('peers', [])
+            ts_refs   = entry.get('ikev1_ts', [])
+            prop_refs = entry.get('ikev2_prop', [])
+            pfs       = entry.get('pfs') or ''
+            match_acl = entry.get('match_acl') or '—'
+
+            actions   = []
+            severity  = 'OK'
+
+            # ── Transform set issues ──────────────────────────
+            for ts_name in ts_refs:
+                if ts_name in ts_issues:
+                    issue = ts_issues[ts_name]
+                    for p in issue['problems']:
+                        actions.append({
+                            'type'       : 'transform-set',
+                            'object_name': ts_name,
+                            'field'      : p['field'],
+                            'current'    : p['current'],
+                            'replacement': p['replacement'],
+                            'status'     : p['status'],
+                            'fmc_path'   : (
+                                "Objects → Object Management → "
+                                "VPN → IKEv1 IPsec Proposals"
+                            ),
+                        })
+                    if issue['severity'] == 'REMOVED':
+                        severity = 'REMOVED'
+                    elif severity != 'REMOVED':
+                        severity = 'DEPRECATED'
+
+            # ── IKEv2 proposal issues ─────────────────────────
+            for prop_name in prop_refs:
+                if prop_name in prop_issues:
+                    issue = prop_issues[prop_name]
+                    for p in issue['problems']:
+                        actions.append({
+                            'type'       : 'ikev2-proposal',
+                            'object_name': prop_name,
+                            'field'      : p['field'],
+                            'current'    : p['current'],
+                            'replacement': p['replacement'],
+                            'status'     : p['status'],
+                            'fmc_path'   : (
+                                "Objects → Object Management → "
+                                "VPN → IKEv2 IPsec Proposals"
+                            ),
+                        })
+                    if issue['severity'] == 'REMOVED':
+                        severity = 'REMOVED'
+                    elif severity != 'REMOVED':
+                        severity = 'DEPRECATED'
+
+            # ── PFS group ─────────────────────────────────────
+            if pfs:
+                grp_m = re.search(r'group\s*(\d+)', pfs.lower())
+                if grp_m:
+                    g = grp_m.group(1)
+                    if g in REMOVED_DH:
+                        actions.append({
+                            'type'       : 'pfs',
+                            'object_name': f'PFS group {g}',
+                            'field'      : 'pfs dh group',
+                            'current'    : f'group {g}',
+                            'replacement': REMOVED_DH[g],
+                            'status'     : 'REMOVED',
+                            'fmc_path'   : (
+                                "Devices → VPN → Site To Site → "
+                                "[connection] → IKE → IKEv1/IKEv2 Settings"
+                            ),
+                        })
+                        severity = 'REMOVED'
+                    elif g in DEPRECATED_DH:
+                        actions.append({
+                            'type'       : 'pfs',
+                            'object_name': f'PFS group {g}',
+                            'field'      : 'pfs dh group',
+                            'current'    : f'group {g}',
+                            'replacement': DEPRECATED_DH[g],
+                            'status'     : 'DEPRECATED',
+                            'fmc_path'   : (
+                                "Devices → VPN → Site To Site → "
+                                "[connection] → IKE → IKEv1/IKEv2 Settings"
+                            ),
+                        })
+                        if severity != 'REMOVED':
+                            severity = 'DEPRECATED'
+
+            if actions:
+                # Look up live SA state for this peer
+                live_info = None
+                for peer in peers:
+                    if peer in live_sa_by_peer:
+                        live_info = live_sa_by_peer[peer]
+                        break
+
+                tunnel_actions.append({
+                    'map_name'  : map_name,
+                    'seq'       : seq,
+                    'interface' : iface,
+                    'peers'     : peers,
+                    'match_acl' : match_acl,
+                    'ts_refs'   : ts_refs,
+                    'prop_refs' : prop_refs,
+                    'actions'   : actions,
+                    'severity'  : severity,
+                    'live_info' : live_info,
+                })
+
+    if not tunnel_actions and not ikev1_pol_actions and not ikev2_pol_actions:
+        lines.append("  [OK] No FMC crypto action items identified.")
+        lines.append("  All configured algorithms are supported on FTD 7.2.8+.")
+        lines.append("")
+        return lines
+
+    if tunnel_actions:
+        # Sort REMOVED first
+        ordered = sorted(
+            tunnel_actions,
+            key=lambda x: (0 if x['severity'] == 'REMOVED' else 1,
+                           x['map_name'], x['seq'])
+        )
+
+        lines.append("  ── C. PER-TUNNEL ACTIONS " + "─" * 52)
+        lines.append("")
+        lines.append("  One block per affected crypto map sequence.")
+        lines.append("  REMOVED items must be fixed before FMC deployment.")
+        lines.append("")
+
+        for t in ordered:
+            peers_str = ', '.join(t['peers']) if t['peers'] else '(no peer set)'
+            sev_label = f"[{t['severity']}]"
+
+            lines.append("  " + "─" * 74)
+            lines.append(f"  Crypto Map   : {t['map_name']}")
+            lines.append(f"  Sequence     : {t['seq']}")
+            lines.append(f"  Interface    : {t['interface']}")
+            lines.append(f"  Peer(s)      : {peers_str}")
+            lines.append(f"  Match ACL    : {t['match_acl']}")
+            lines.append(f"  Severity     : {sev_label}")
+
+            # Live SA state if available
+            if t['live_info']:
+                li = t['live_info']
+                lines.append(f"  Live SA      : {li.get('alg_status','—')}"
+                             f"  (source: {li.get('source','')})")
+                if li.get('enc_raw'):
+                    lines.append(f"    Negotiated enc  : {li['enc_raw']}")
+                if li.get('hash_raw'):
+                    lines.append(f"    Negotiated hash : {li['hash_raw']}")
+                if li.get('transform_set'):
+                    lines.append(
+                        f"    Active TS       : {li['transform_set']}"
+                    )
+
+            lines.append("")
+
+            # Group actions by FMC path
+            from collections import OrderedDict
+            by_path = OrderedDict()
+            for action in t['actions']:
+                path = action['fmc_path']
+                by_path.setdefault(path, []).append(action)
+
+            for path, path_actions in by_path.items():
+                lines.append(f"  FMC Location : {path}")
+                for action in path_actions:
+                    lines.append(
+                        f"    [{action['status']}] "
+                        f"{action['type'].upper()} '{action['object_name']}'"
+                    )
+                    lines.append(
+                        f"      {action['field']}: "
+                        f"change '{action['current']}' "
+                        f"→ '{action['replacement']}'"
+                    )
+                lines.append("")
+
+            lines.append("  PEER-SIDE COORDINATION REQUIRED:")
+            lines.append(f"    Notify peer(s): {peers_str}")
+            lines.append("    The remote peer must update their Phase 1 and")
+            lines.append("    Phase 2 config to match before tunnels will")
+            lines.append("    re-establish after FTD cutover.")
+            lines.append("")
+
+    # ── STEP D: Deployment Validation ─────────────────────────
+    removed_count    = sum(
+        1 for t in tunnel_actions if t['severity'] == 'REMOVED'
+    )
+    deprecated_count = sum(
+        1 for t in tunnel_actions if t['severity'] == 'DEPRECATED'
+    )
+
+    lines.append("  ── D. DEPLOYMENT VALIDATION STEPS " + "─" * 43)
+    lines.append("")
+    lines.append("  After completing all FMC changes above:")
+    lines.append("")
+    lines.append("  1. FMC → Deploy → Deployment → select FTD HA pair")
+    lines.append("     Click 'Preview' — review VPN config changes.")
+    lines.append("     Any remaining unsupported algorithms will appear")
+    lines.append("     as deployment warnings or errors here.")
+    lines.append("")
+    lines.append("  2. Confirm zero deployment ERRORS before cutover.")
+    lines.append("     Deployment WARNINGS on deprecated items are")
+    lines.append("     acceptable for April 20th but schedule cleanup.")
+    lines.append("")
+    lines.append("  3. Post-cutover: verify each previously-affected tunnel:")
+    lines.append("     FMC → Site-to-Site VPN → VPN Summary")
+    lines.append("     Confirm all tunnels show UP status.")
+    lines.append("")
+    lines.append("  4. For any tunnel that stays down post-cutover:")
+    lines.append("     FMC → Devices → Device Management → FTD HA Pair")
+    lines.append("     → Troubleshoot → Packet Tracer / Unified Events")
+    lines.append("     Or from FTD diagnostic CLI:")
+    lines.append("     > show crypto ikev2 sa")
+    lines.append("     > show crypto ipsec sa peer <peer-ip>")
+    lines.append("")
+
+    if removed_count:
+        lines.append(f"  SUMMARY: {removed_count} tunnel(s) have REMOVED algorithms")
+        lines.append("  and WILL FAIL to deploy/negotiate without the changes")
+        lines.append("  listed above.")
+    if deprecated_count:
+        lines.append(f"  SUMMARY: {deprecated_count} tunnel(s) use DEPRECATED")
+        lines.append("  algorithms. These will deploy successfully on FTD 7.2.8")
+        lines.append("  but should be remediated before the next FTD upgrade.")
+    lines.append("")
+
+    return lines
+
+
 def build_technical_report(results, p3, p4, p5,
                            filepath, sections_data):
     """
@@ -1218,6 +1766,10 @@ def build_technical_report(results, p3, p4, p5,
     out.append(capture_output(
         p3.print_interface_brief, results['interfaces']
     ))
+    if results.get('interfaces_verbose'):
+        out.append(capture_output(
+            p3.print_interface_verbose, results['interfaces_verbose']
+        ))
 
     # Section 3: Routing Table
     out.append(_section_header("3", "ROUTING TABLE"))
@@ -1225,13 +1777,41 @@ def build_technical_report(results, p3, p4, p5,
         p3.print_route_table, results['routes']
     ))
 
-    # Section 4: VPN Sessions
-    out.append(_section_header("4", "VPN SESSION SUMMARY"))
+    # Section 4: VPN Sessions — summary + per-session detail
+    out.append(_section_header("4", "VPN SESSION ANALYSIS"))
     out.append(capture_output(
         p3.print_vpn_summary,
         results['vpn_sessions'],
         results['vpn_session_types'],
     ))
+    if results.get('vpn_anyconnect'):
+        out.append(capture_output(
+            p3.print_vpn_anyconnect, results['vpn_anyconnect']
+        ))
+    if results.get('vpn_l2l'):
+        out.append(capture_output(
+            p3.print_vpn_l2l, results['vpn_l2l']
+        ))
+    if results.get('vpn_ratio_enc'):
+        out.append(capture_output(
+            p3.print_vpn_ratio,
+            results['vpn_ratio_enc'],
+            results['vpn_ratio_enc_totals'],
+            "VPN-SESSIONDB-RATIO-ENC",
+        ))
+    if results.get('vpn_ratio_proto'):
+        out.append(capture_output(
+            p3.print_vpn_ratio,
+            results['vpn_ratio_proto'],
+            results['vpn_ratio_proto_totals'],
+            "VPN-SESSIONDB-RATIO-PROTO",
+        ))
+    if results.get('vpn_full_l2l') or results.get('vpn_full_ac_count', 0) > 0:
+        out.append(capture_output(
+            p3.print_vpn_full,
+            results['vpn_full_l2l'],
+            results['vpn_full_ac_count'],
+        ))
 
     # Section 5: ACL Analysis
     out.append(_section_header("5", "ACCESS CONTROL LIST ANALYSIS"))
@@ -1249,7 +1829,7 @@ def build_technical_report(results, p3, p4, p5,
         results['cfg_acl_unmatched'],
     ))
 
-    # Section 6: Crypto & PKI
+    # Section 6: Crypto Config Analysis
     out.append(_section_header("6", "CRYPTO & PKI ANALYSIS"))
     out.append(capture_output(
         p4.print_crypto,
@@ -1273,6 +1853,50 @@ def build_technical_report(results, p3, p4, p5,
         results['crypto_partials'],
         results['crypto_unmatched'],
     ))
+
+    # Section 6b: FMC Action Items — per-tunnel deployment blockers
+    out.extend(_build_fmc_action_items(results))
+
+    # Section 6c: Live Crypto SA State
+    out.append(_section_header(
+        "6c", "LIVE CRYPTO SA STATE (at log capture time)"
+    ))
+    out.append("  The following sections show the state of active IKE and")
+    out.append("  IPsec SAs at the time the show commands were collected.")
+    out.append("  Use this to confirm which tunnels were up, identify")
+    out.append("  peers negotiating with weak algorithms, and establish")
+    out.append("  a pre-migration baseline for post-cutover comparison.")
+    out.append("")
+
+    if results.get('ikev1_sas'):
+        out.append(capture_output(
+            p3.print_isakmp_sa, results['ikev1_sas'], 'IKEv1'
+        ))
+    else:
+        out.append("  [INFO] No IKEv1 SA data captured.\n")
+
+    if results.get('ikev2_sas'):
+        out.append(capture_output(
+            p3.print_ikev2_sa, results['ikev2_sas']
+        ))
+    else:
+        out.append("  [INFO] No IKEv2 SA data captured.\n")
+
+    if results.get('ipsec_sas'):
+        out.append(capture_output(
+            p3.print_ipsec_sa, results['ipsec_sas']
+        ))
+    else:
+        out.append("  [INFO] No IPsec SA data captured.\n")
+
+    if results.get('ipsec_stats'):
+        out.append(capture_output(
+            p3.print_crypto_stats, results['ipsec_stats'], 'IPsec'
+        ))
+    if results.get('isakmp_stats'):
+        out.append(capture_output(
+            p3.print_crypto_stats, results['isakmp_stats'], 'ISAKMP'
+        ))
 
     # Section 7: NAT
     out.append(_section_header("7", "NAT ANALYSIS"))
@@ -1462,6 +2086,8 @@ def main():
     print("        Interfaces    : " + str(len(results['interfaces'])))
     print("        Routes        : " + str(len(results['routes'])))
     print("        VPN sessions  : " + str(len(results['vpn_sessions'])))
+    print("        L2L tunnels   : " + str(len(results.get('vpn_l2l', []))))
+    print("        IPsec SAs     : " + str(len(results.get('ipsec_sas', []))))
     print("        ACL rules     : " + str(total_rules))
     print("        Transform sets: " + str(len(results['ikev1_ts'])))
     print("        Crypto maps   : " + str(map_count))
